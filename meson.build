@@ -78,6 +78,8 @@ uam_files = []
 uam_incs = []
 uam_install_headers = []
 
+uam_incs += include_directories('source')
+
 subdir('source')
 subdir('mesa-imported')
 
@@ -107,3 +109,13 @@ if build_mode == 'exe' or build_mode == 'both'
 		install: true,
 	)
 endif
+
+# SPIR-V parser unit tests (standalone, no NV50_IR dependency)
+test_spirv_parser = executable(
+	'test_spirv_parser',
+	files('tests/test_spirv_parser.cpp', 'source/spirv_frontend.cpp'),
+	cpp_args: ['-DDESKTOP'],
+	include_directories: uam_incs,
+	install: false,
+)
+test('spirv_parser', test_spirv_parser)
