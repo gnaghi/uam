@@ -1,8 +1,8 @@
 # uam - deko3d shader compiler
 
-uam compiles GLSL 4.60 shaders into DKSH (deko3d shader) binaries. It can be built as a **static library** for runtime compilation on Nintendo Switch, as a **CLI executable** for offline compilation on PC, or **both**. It targets the Nvidia Tegra X1 (Maxwell GM20B) GPU.
+uam compiles **GLSL 4.60** and **SPIR-V** shaders into DKSH (deko3d shader) binaries. It can be built as a **static library** for runtime compilation on Nintendo Switch, as a **CLI executable** for offline compilation on PC, or **both**. It targets the Nvidia Tegra X1 (Maxwell GM20B) GPU.
 
-Based on [mesa](https://www.mesa3d.org/) 19.0.8's GLSL parser and TGSI infrastructure, and nouveau's nv50_ir code generation backend.
+Based on [mesa](https://www.mesa3d.org/) 19.0.8's GLSL parser and TGSI infrastructure, and nouveau's nv50_ir code generation backend. The SPIR-V path bypasses TGSI and translates directly to NV50_IR.
 
 ## Building
 
@@ -38,7 +38,16 @@ meson setup builddir_host -Dbuild_mode=exe
 meson compile -C builddir_host
 ```
 
-Usage: `uam -s vert -o output.dksh input.glsl`
+Usage:
+
+```bash
+# GLSL input
+uam -s vert -o output.dksh input.glsl
+
+# SPIR-V input (auto-detected from magic number, or explicit)
+uam -s vert -o output.dksh shader.spv
+uam -s frag -i spirv -o output.dksh shader.spv
+```
 
 ### Both targets
 
@@ -76,6 +85,14 @@ if (uam_compile_dksh(compiler, glsl)) {
 
 // Cleanup
 uam_free_compiler(compiler);
+
+// --- SPIR-V compilation ---
+// spirv_data is a pointer to a SPIR-V binary, spirv_size is its size in bytes
+if (uam_compile_spirv(compiler, spirv_data, spirv_size)) {
+    size_t size = uam_get_code_size(compiler);
+    void *dksh = malloc(size);
+    uam_write_code(compiler, dksh);
+}
 ```
 
 ### Function reference
@@ -86,6 +103,7 @@ uam_free_compiler(compiler);
 | `uam_create_compiler_ex(stage, opt_level)` | Create compiler with custom optimization level |
 | `uam_free_compiler(compiler)` | Destroy compiler and free resources |
 | `uam_compile_dksh(compiler, glsl)` | Compile GLSL source, returns true on success |
+| `uam_compile_spirv(compiler, data, size)` | Compile SPIR-V binary, returns true on success |
 | `uam_get_code_size(compiler)` | Get DKSH binary size (with container) |
 | `uam_get_raw_code_size(compiler)` | Get raw Maxwell bytecode size |
 | `uam_write_code(compiler, memory)` | Write DKSH binary to a memory buffer |
@@ -100,6 +118,16 @@ uam_free_compiler(compiler);
 - Default uniforms outside UBO blocks are **not supported** (will produce an error)
 - `layout(location = N)` is required for vertex inputs and varying I/O
 - The `DEKO3D` preprocessor symbol is defined (value 100)
+
+## SPIR-V support
+
+uam accepts SPIR-V binaries as input (auto-detected from the `0x07230203` magic number, or forced with `-i spirv`). The SPIR-V path translates directly to NV50_IR, bypassing TGSI.
+
+**Supported:** vertex and fragment shaders, arithmetic/bitwise/comparison/conversion ops, composites, memory access (load/store/access chain), control flow (branch/phi/kill), UBOs, built-in variables (gl_Position, gl_FragCoord, gl_VertexID, gl_InstanceID, gl_FrontFacing, gl_FragDepth), GLSL.std.450 math functions, interpolation qualifiers (flat, noPerspective, centroid).
+
+**Not yet supported:** texture sampling (stubbed), SSBO/image access from SPIR-V, geometry/tessellation/compute stages (untested).
+
+See [docs/SPIRV_SUPPORT.md](docs/SPIRV_SUPPORT.md) for full details.
 
 ## Differences with standard GL and mesa/nouveau
 
@@ -131,3 +159,12 @@ uam_free_compiler(compiler);
 		- `MOV Rd,RZ` is now preferred to `MOV32I Rd,0`.
 		- `LDG`/`STG` instructions are used for SSBO accesses instead of `LD`/`ST`.
 		- Shader programs are properly padded out to a size that is a multiple of 64 bytes.
+
+## Tests
+
+```bash
+meson setup builddir_test
+meson test -C builddir_test
+```
+
+The SPIR-V parser has 38 unit tests covering header validation, type parsing, decorations, constants, variables, functions, and a full integration test with a realistic vertex shader module.
