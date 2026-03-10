@@ -2,6 +2,7 @@
 uam_files += files(
 	'compiler_iface.cpp',
 	'glsl_frontend.cpp',
+	'glslang_frontend.cpp',
 	'spirv_frontend.cpp',
 	'uam.cpp',
 	'mini-os.c',

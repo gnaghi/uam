@@ -258,6 +258,7 @@ private:
    bool convertFunction(const spirv::Function& func);
    bool convertBlock(const spirv::BasicBlock& block);
    bool convertInstruction(const spirv::Instruction& inst);
+   bool handleFunctionCall(const spirv::Instruction& inst);
 
    // Instruction handlers
    void handleLoad(const spirv::Instruction& inst);
@@ -296,6 +297,13 @@ private:
 
    void handleImageSample(const spirv::Instruction& inst);
    void handleImageFetch(const spirv::Instruction& inst);
+
+   // Sampler binding tracking
+   struct SamplerInfo {
+      int binding;        // texture/sampler binding index
+      uint32_t imageTypeId; // SPIR-V image type ID
+   };
+   TexTarget spvDimToTexTarget(SpvDim dim, bool depth, bool arrayed, bool ms) const;
 
    void handleDerivative(const spirv::Instruction& inst, operation op);
 
@@ -348,6 +356,11 @@ private:
    std::map<uint32_t, unsigned> outputVarToIndex;
    std::map<uint32_t, unsigned> sysValToIndex;
 
+   // Sampler info: SSA value id → SamplerInfo
+   std::map<uint32_t, SamplerInfo> samplerInfoMap;
+   // Variable id → binding, for tracking OpLoad of sampled image vars
+   std::map<uint32_t, int> varBindings;
+
    // Fragment shader: 1/w for perspective interpolation
    Value *fragCoordW;
 
@@ -356,11 +369,19 @@ private:
 
    // Value map for DataArray
    ValueMap valueMap;
+
+   // Function inlining context
+   unsigned inlineDepth;
+   BasicBlock *inlineReturnBlock;  // continuation block after inlined return
+   uint32_t inlineReturnId;        // call result ID for return value
+   unsigned inlineReturnComps;     // number of components in return value
 };
 
 Converter::Converter(Program *ir, const spirv::Program *spv,
                      struct nv50_ir_prog_info *info_)
-   : BuildUtil(ir), spv(spv), info(info_), fragCoordW(nullptr), oData(this)
+   : BuildUtil(ir), spv(spv), info(info_), fragCoordW(nullptr), oData(this),
+     inlineDepth(0), inlineReturnBlock(nullptr), inlineReturnId(0),
+     inlineReturnComps(0)
 {
 }
 
@@ -542,10 +563,35 @@ Converter::addSysVal(SpvBuiltIn bi, bool isInput)
 void
 Converter::addUniform(uint32_t varId, const spirv::Variable& var)
 {
-   // UBOs are accessed via FILE_MEMORY_CONST
-   // The binding decoration determines the constbuf slot
-   (void)varId;
-   (void)var;
+   // Track binding for sampled image and sampler variables
+   const spirv::DecorationData& dec = spv->getDecoration(varId);
+   if (dec.binding >= 0)
+      varBindings[varId] = dec.binding;
+}
+
+TexTarget
+Converter::spvDimToTexTarget(SpvDim dim, bool depth, bool arrayed, bool ms) const
+{
+   switch (dim) {
+   case SpvDim1D:
+      if (depth) return arrayed ? TEX_TARGET_1D_ARRAY_SHADOW : TEX_TARGET_1D_SHADOW;
+      return arrayed ? TEX_TARGET_1D_ARRAY : TEX_TARGET_1D;
+   case SpvDim2D:
+      if (ms) return arrayed ? TEX_TARGET_2D_MS_ARRAY : TEX_TARGET_2D_MS;
+      if (depth) return arrayed ? TEX_TARGET_2D_ARRAY_SHADOW : TEX_TARGET_2D_SHADOW;
+      return arrayed ? TEX_TARGET_2D_ARRAY : TEX_TARGET_2D;
+   case SpvDim3D:
+      return TEX_TARGET_3D;
+   case SpvDimCube:
+      if (depth) return arrayed ? TEX_TARGET_CUBE_ARRAY_SHADOW : TEX_TARGET_CUBE_SHADOW;
+      return arrayed ? TEX_TARGET_CUBE_ARRAY : TEX_TARGET_CUBE;
+   case SpvDimRect:
+      return depth ? TEX_TARGET_RECT_SHADOW : TEX_TARGET_RECT;
+   case SpvDimBuffer:
+      return TEX_TARGET_BUFFER;
+   default:
+      return TEX_TARGET_2D;
+   }
 }
 
 void
@@ -1429,6 +1475,29 @@ Converter::handleLoad(const spirv::Instruction& inst)
    const spirv::Variable* var = spv->getVariable(ptrId);
 
    if (var) {
+      // Track sampled image / sampler loads for texture operations
+      if (var->storageClass == SpvStorageClassUniformConstant) {
+         const spirv::Type* ptrTy = spv->getType(var->typeId);
+         const spirv::Type* pointeeTy = ptrTy ? spv->getType(ptrTy->elementTypeId) : nullptr;
+         if (pointeeTy &&
+             (pointeeTy->kind == spirv::TYPE_SAMPLED_IMAGE ||
+              pointeeTy->kind == spirv::TYPE_IMAGE ||
+              pointeeTy->kind == spirv::TYPE_SAMPLER)) {
+            auto bit = varBindings.find(ptrId);
+            if (bit != varBindings.end()) {
+               SamplerInfo si;
+               si.binding = bit->second;
+               // For sampled image, get the underlying image type
+               if (pointeeTy->kind == spirv::TYPE_SAMPLED_IMAGE)
+                  si.imageTypeId = pointeeTy->elementTypeId;
+               else
+                  si.imageTypeId = pointeeTy->id;
+               samplerInfoMap[resId] = si;
+            }
+            return; // sampled images are not loaded as scalar values
+         }
+      }
+
       if (var->storageClass == SpvStorageClassInput) {
          // Load from shader input
          const spirv::DecorationData& dec = spv->getDecoration(ptrId);
@@ -2183,22 +2252,188 @@ Converter::handleGlslStd450(const spirv::Instruction& inst, GLSLstd450 op)
 void
 Converter::handleImageSample(const spirv::Instruction& inst)
 {
+   // OpImageSampleImplicitLod  %result %sampledImage %coordinate [ImageOperands ...]
+   // OpImageSampleExplicitLod  %result %sampledImage %coordinate ImageOperands Lod/Grad
+   // OpImageSampleDrefImplicitLod %result %sampledImage %coordinate %dref [ImageOperands ...]
+   // OpImageSampleDrefExplicitLod %result %sampledImage %coordinate %dref ImageOperands Lod
    uint32_t resId = inst.resultId();
    unsigned comps = getResultComponents(inst);
-   // TODO: Full texture sampling support
-   for (unsigned c = 0; c < comps; c++)
-      setSSAComponent(resId, c, loadImm(nullptr, 0.0f));
-   fprintf(stderr, "SPIR-V: texture sampling not yet implemented\n");
+   uint32_t sampledImageId = inst.word(3);
+   uint32_t coordId = inst.word(4);
+
+   bool hasDref = (inst.opcode == SpvOpImageSampleDrefImplicitLod ||
+                   inst.opcode == SpvOpImageSampleDrefExplicitLod);
+   bool isExplicit = (inst.opcode == SpvOpImageSampleExplicitLod ||
+                      inst.opcode == SpvOpImageSampleDrefExplicitLod);
+
+   uint32_t drefId = 0;
+   unsigned nextWord = 5;
+   if (hasDref) {
+      drefId = inst.word(5);
+      nextWord = 6;
+   }
+
+   // Parse image operands mask if present
+   uint32_t imgOpMask = 0;
+   Value *lodVal = nullptr;
+   Value *biasVal = nullptr;
+   if (nextWord < inst.wordCount) {
+      imgOpMask = inst.word(nextWord);
+      nextWord++;
+
+      if (imgOpMask & 0x1) { // Bias
+         biasVal = getSSAComponent(inst.word(nextWord), 0);
+         nextWord++;
+      }
+      if (imgOpMask & 0x2) { // Lod
+         lodVal = getSSAComponent(inst.word(nextWord), 0);
+         nextWord++;
+      }
+      // Grad (0x4), ConstOffset (0x8), etc. — skip for now
+   }
+
+   // Look up sampler info to get binding and image type
+   int binding = 0;
+   TexTarget texTarget = TEX_TARGET_2D;
+   auto sit = samplerInfoMap.find(sampledImageId);
+   if (sit != samplerInfoMap.end()) {
+      binding = sit->second.binding;
+      const spirv::Type* imgTy = spv->getType(sit->second.imageTypeId);
+      if (imgTy && imgTy->kind == spirv::TYPE_IMAGE) {
+         texTarget = spvDimToTexTarget(imgTy->dim,
+                                        imgTy->depth != 0,
+                                        imgTy->arrayed != 0,
+                                        imgTy->multisampled != 0);
+      }
+   }
+
+   // Determine the operation
+   operation texOp = OP_TEX;
+   if (isExplicit && lodVal)
+      texOp = OP_TXL;
+   else if (biasVal)
+      texOp = OP_TXB;
+
+   // For non-fragment shaders, implicit LOD becomes LOD=0
+   if (!isExplicit && !biasVal &&
+       prog->getType() != Program::TYPE_FRAGMENT) {
+      texOp = OP_TXL;
+      lodVal = loadImm(nullptr, 0.0f);
+   }
+
+   TexInstruction::Target tgt(texTarget);
+
+   // Create the TexInstruction
+   TexInstruction *texi = new_TexInstruction(func, texOp);
+
+   // Set up destinations
+   unsigned d = 0;
+   for (unsigned c = 0; c < comps && c < 4; c++) {
+      texi->setDef(d++, getSSA());
+      texi->tex.mask |= 1 << c;
+   }
+
+   // Set up coordinate sources
+   unsigned coordComps = getTypeComponents(spv, inst.resultType());
+   // Use target argument count for coordinate dimensions
+   unsigned argCount = tgt.getArgCount();
+   unsigned s = 0;
+   for (unsigned c = 0; c < argCount; c++) {
+      Value *coord = getSSAComponent(coordId, c);
+      if (!coord) coord = loadImm(nullptr, 0.0f);
+      texi->setSrc(s++, coord);
+   }
+
+   // LOD or bias
+   if (lodVal)
+      texi->setSrc(s++, lodVal);
+   else if (biasVal)
+      texi->setSrc(s++, biasVal);
+
+   // Shadow comparison (Dref)
+   if (hasDref) {
+      Value *dref = getSSAComponent(drefId, 0);
+      if (!dref) dref = loadImm(nullptr, 0.0f);
+      texi->setSrc(s++, dref);
+   }
+
+   // Set texture and sampler binding
+   // Both resource (r) and sampler (s) use the same binding index
+   texi->setTexture(tgt, (uint8_t)binding, (uint8_t)binding);
+
+   // In non-fragment shaders, implicit lod samples at lod 0
+   if (texOp == OP_TXL && !isExplicit && !biasVal)
+      texi->tex.levelZero = true;
+
+   bb->insertTail(texi);
+
+   // Copy results to SSA
+   for (unsigned c = 0; c < comps && c < 4; c++)
+      setSSAComponent(resId, c, texi->getDef(c));
 }
 
 void
 Converter::handleImageFetch(const spirv::Instruction& inst)
 {
+   // OpImageFetch %result %image %coordinate [ImageOperands ...]
    uint32_t resId = inst.resultId();
    unsigned comps = getResultComponents(inst);
-   for (unsigned c = 0; c < comps; c++)
-      setSSAComponent(resId, c, loadImm(nullptr, 0u));
-   fprintf(stderr, "SPIR-V: texel fetch not yet implemented\n");
+   uint32_t imageId = inst.word(3);
+   uint32_t coordId = inst.word(4);
+
+   // Parse image operands for Lod
+   Value *lodVal = nullptr;
+   if (inst.wordCount > 5) {
+      uint32_t imgOpMask = inst.word(5);
+      unsigned nextWord = 6;
+      if (imgOpMask & 0x2) { // Lod
+         lodVal = getSSAComponent(inst.word(nextWord), 0);
+      }
+   }
+   if (!lodVal)
+      lodVal = loadImm(nullptr, 0);
+
+   // Look up sampler info
+   int binding = 0;
+   TexTarget texTarget = TEX_TARGET_2D;
+   auto sit = samplerInfoMap.find(imageId);
+   if (sit != samplerInfoMap.end()) {
+      binding = sit->second.binding;
+      const spirv::Type* imgTy = spv->getType(sit->second.imageTypeId);
+      if (imgTy && imgTy->kind == spirv::TYPE_IMAGE)
+         texTarget = spvDimToTexTarget(imgTy->dim, false,
+                                        imgTy->arrayed != 0,
+                                        imgTy->multisampled != 0);
+   }
+
+   TexInstruction::Target tgt(texTarget);
+   TexInstruction *texi = new_TexInstruction(func, OP_TXF);
+
+   unsigned d = 0;
+   for (unsigned c = 0; c < comps && c < 4; c++) {
+      texi->setDef(d++, getSSA());
+      texi->tex.mask |= 1 << c;
+   }
+
+   // Coordinates
+   unsigned argCount = tgt.getArgCount();
+   unsigned s = 0;
+   for (unsigned c = 0; c < argCount; c++) {
+      Value *coord = getSSAComponent(coordId, c);
+      if (!coord) coord = loadImm(nullptr, 0);
+      texi->setSrc(s++, coord);
+   }
+
+   // LOD (or sample index for MS)
+   texi->setSrc(s++, lodVal);
+   if (tgt.isMS())
+      texi->tex.levelZero = true;
+
+   texi->setTexture(tgt, (uint8_t)binding, (uint8_t)binding);
+   bb->insertTail(texi);
+
+   for (unsigned c = 0; c < comps && c < 4; c++)
+      setSSAComponent(resId, c, texi->getDef(c));
 }
 
 // ============================================================================
@@ -2229,21 +2464,20 @@ Converter::handleBranchConditional(const spirv::Instruction& inst)
    Value *cond = getSSAComponent(condId, 0);
    if (!cond) cond = loadImm(nullptr, 0u);
 
-   // Convert boolean to predicate
-   Value *pred = getSSA(1, FILE_PREDICATE);
-   mkCmp(OP_SET, CC_NE, TYPE_U32, pred, TYPE_U32, cond, loadImm(nullptr, 0u));
-
    auto itTrue = labelToBB.find(trueLabel);
    auto itFalse = labelToBB.find(falseLabel);
+   if (itTrue == labelToBB.end() || itFalse == labelToBB.end())
+      return;
 
-   if (itTrue != labelToBB.end()) {
-      mkFlow(OP_BRA, itTrue->second, CC_P, pred);
-      bb->cfg.attach(&itTrue->second->cfg, Graph::Edge::TREE);
-   }
-   if (itFalse != labelToBB.end()) {
-      mkFlow(OP_BRA, itFalse->second, CC_ALWAYS, nullptr);
-      bb->cfg.attach(&itFalse->second->cfg, Graph::Edge::TREE);
-   }
+   // Convert boolean to predicate
+   Value *pred = new_LValue(func, FILE_PREDICATE);
+   mkCmp(OP_SET, CC_NE, TYPE_U32, pred, TYPE_U32, cond, loadImm(nullptr, 0u));
+
+   // Single conditional branch: skip to FALSE if condition NOT set.
+   // True path is the fall-through (matches TGSI IF pattern).
+   mkFlow(OP_BRA, itFalse->second, CC_NOT_P, pred);
+   bb->cfg.attach(&itTrue->second->cfg, Graph::Edge::TREE);
+   bb->cfg.attach(&itFalse->second->cfg, Graph::Edge::TREE);
 }
 
 void
@@ -2274,8 +2508,21 @@ Converter::handlePhi(const spirv::Instruction& inst)
 void
 Converter::handleReturn(const spirv::Instruction& inst)
 {
-   (void)inst;
-   // Don't emit OP_RET for main function; we'll just fall through
+   if (inlineReturnBlock) {
+      // Inside an inlined function: copy return value and branch to continuation
+      if (inst.opcode == SpvOpReturnValue && inlineReturnId) {
+         uint32_t valId = inst.word(1);
+         for (unsigned c = 0; c < inlineReturnComps; c++) {
+            Value *v = getSSAComponent(valId, c);
+            if (!v) v = loadImm(nullptr, 0u);
+            setSSAComponent(inlineReturnId, c, v);
+         }
+      }
+      mkFlow(OP_BRA, inlineReturnBlock, CC_ALWAYS, nullptr);
+      bb->cfg.attach(&inlineReturnBlock->cfg, Graph::Edge::TREE);
+      return;
+   }
+   // Main function: don't emit OP_RET, just fall through to leave block
 }
 
 void
@@ -2284,6 +2531,94 @@ Converter::handleKill(const spirv::Instruction& inst)
    (void)inst;
    mkOp(OP_DISCARD, TYPE_NONE, nullptr);
    info->prop.fp.usesDiscard = true;
+}
+
+// ============================================================================
+// Function call inlining
+// ============================================================================
+
+bool
+Converter::handleFunctionCall(const spirv::Instruction& inst)
+{
+   // OpFunctionCall %resultType %resultId %functionId %arg0 %arg1 ...
+   if (inlineDepth >= 16) {
+      fprintf(stderr, "SPIR-V: function call nesting too deep (>16)\n");
+      return false;
+   }
+
+   uint32_t resId = inst.resultId();
+   uint32_t funcId = inst.word(3);
+
+   // Find the called function
+   const spirv::Function* calledFunc = nullptr;
+   for (auto& f : spv->functions) {
+      if (f.id == funcId) {
+         calledFunc = &f;
+         break;
+      }
+   }
+
+   if (!calledFunc || calledFunc->blocks.empty()) {
+      fprintf(stderr, "SPIR-V: called function %u not found or empty\n", funcId);
+      return false;
+   }
+
+   // Map function parameters to call arguments
+   for (unsigned i = 0; i < calledFunc->paramIds.size(); i++) {
+      uint32_t paramId = calledFunc->paramIds[i];
+      uint32_t argId = inst.word(4 + i);
+      auto it = ssaValues.find(argId);
+      if (it != ssaValues.end()) {
+         ssaValues[paramId] = it->second;
+      }
+   }
+
+   // Create NV50_IR basic blocks for the called function's blocks
+   for (auto& block : calledFunc->blocks) {
+      BasicBlock *newBB = new BasicBlock(prog->main);
+      labelToBB[block.labelId] = newBB;
+   }
+
+   // Create continuation block (execution resumes here after return)
+   BasicBlock *contBB = new BasicBlock(prog->main);
+
+   // Save current inline context
+   unsigned savedDepth = inlineDepth;
+   BasicBlock *savedRetBlock = inlineReturnBlock;
+   uint32_t savedRetId = inlineReturnId;
+   unsigned savedRetComps = inlineReturnComps;
+
+   // Set up inline context for the called function
+   inlineDepth++;
+   inlineReturnBlock = contBB;
+   inlineReturnId = resId;
+   inlineReturnComps = inst.hasResultType() ? getResultComponents(inst) : 0;
+
+   // Branch from current position to the function's entry block
+   BasicBlock *funcEntry = labelToBB[calledFunc->blocks.front().labelId];
+   mkFlow(OP_BRA, funcEntry, CC_ALWAYS, nullptr);
+   bb->cfg.attach(&funcEntry->cfg, Graph::Edge::TREE);
+
+   // Process all blocks in the called function
+   for (auto& block : calledFunc->blocks) {
+      BasicBlock *currBB = labelToBB[block.labelId];
+      setPosition(currBB, true);
+
+      for (auto instPtr : block.instructions) {
+         if (!convertInstruction(*instPtr))
+            return false;
+      }
+   }
+
+   // Restore inline context
+   inlineDepth = savedDepth;
+   inlineReturnBlock = savedRetBlock;
+   inlineReturnId = savedRetId;
+   inlineReturnComps = savedRetComps;
+
+   // Continue from the continuation block
+   setPosition(contBB, true);
+   return true;
 }
 
 // ============================================================================
@@ -2618,14 +2953,20 @@ Converter::convertInstruction(const spirv::Instruction& inst)
       break;
 
    // Texture operations (Phase 3)
-   case SpvOpSampledImage:
-      // Just pass through the image operand
-      if (inst.hasResultId()) {
-         uint32_t resId = inst.resultId();
-         uint32_t imgId = inst.word(3);
-         ssaValues[resId] = ssaValues[imgId];
-      }
+   case SpvOpSampledImage: {
+      // OpSampledImage %result %image %sampler
+      // Propagate sampler info from the image or sampler operand
+      uint32_t resId = inst.resultId();
+      uint32_t imgId = inst.word(3);
+      // uint32_t samId = inst.word(4); // sampler (unused for now, same binding in combined)
+      ssaValues[resId] = ssaValues[imgId];
+
+      // Propagate sampler binding info from the image operand
+      auto sit = samplerInfoMap.find(imgId);
+      if (sit != samplerInfoMap.end())
+         samplerInfoMap[resId] = sit->second;
       break;
+   }
    case SpvOpImageSampleImplicitLod:
    case SpvOpImageSampleExplicitLod:
    case SpvOpImageSampleDrefImplicitLod:
@@ -2689,15 +3030,120 @@ Converter::convertInstruction(const spirv::Instruction& inst)
    case SpvOpLabel:
    case SpvOpSelectionMerge:
    case SpvOpLoopMerge:
-   case SpvOpFunctionCall: // TODO
-   case SpvOpTranspose: // TODO
-   case SpvOpOuterProduct: // TODO
-   case SpvOpMatrixTimesMatrix: // TODO
       break;
+   case SpvOpFunctionCall:
+      if (!handleFunctionCall(inst))
+         return false;
+      break;
+   case SpvOpTranspose: {
+      // OpTranspose %result %matrix
+      // For an NxM matrix (N cols, M rows), transpose to MxN
+      uint32_t resId2 = inst.resultId();
+      uint32_t matId = inst.word(3);
+      const spirv::Type* resTy = spv->getType(inst.resultType());
+      if (resTy && resTy->kind == spirv::TYPE_MATRIX) {
+         unsigned outCols = resTy->componentCount;
+         const spirv::Type* colTy = spv->getType(resTy->elementTypeId);
+         unsigned outRows = colTy ? colTy->componentCount : 1;
+         // Input matrix has outRows cols and outCols rows
+         unsigned inCols = outRows;
+         unsigned inRows = outCols;
+         // result[col][row] = input[row][col]
+         for (unsigned col = 0; col < outCols; col++) {
+            for (unsigned row = 0; row < outRows; row++) {
+               // input element at column=row, row=col → linear index row*inRows + col
+               unsigned srcIdx = row * inRows + col;
+               unsigned dstIdx = col * outRows + row;
+               Value *val = getSSAComponent(matId, srcIdx);
+               if (!val) val = loadImm(nullptr, 0.0f);
+               setSSAComponent(resId2, dstIdx, val);
+            }
+         }
+      }
+      break;
+   }
+   case SpvOpOuterProduct: {
+      // OpOuterProduct %result %vector1 %vector2
+      // result[col][row] = vec1[row] * vec2[col]
+      uint32_t resId2 = inst.resultId();
+      uint32_t v1Id = inst.word(3);
+      uint32_t v2Id = inst.word(4);
+      const spirv::Type* resTy = spv->getType(inst.resultType());
+      if (resTy && resTy->kind == spirv::TYPE_MATRIX) {
+         unsigned cols = resTy->componentCount;
+         const spirv::Type* colTy = spv->getType(resTy->elementTypeId);
+         unsigned rows = colTy ? colTy->componentCount : 1;
+         for (unsigned col = 0; col < cols; col++) {
+            Value *v2c = getSSAComponent(v2Id, col);
+            if (!v2c) v2c = loadImm(nullptr, 0.0f);
+            for (unsigned row = 0; row < rows; row++) {
+               Value *v1r = getSSAComponent(v1Id, row);
+               if (!v1r) v1r = loadImm(nullptr, 0.0f);
+               Value *dst = getSSA();
+               mkOp2(OP_MUL, TYPE_F32, dst, v1r, v2c);
+               setSSAComponent(resId2, col * rows + row, dst);
+            }
+         }
+      }
+      break;
+   }
+   case SpvOpMatrixTimesMatrix: {
+      // OpMatrixTimesMatrix %result %left %right
+      // result = left * right
+      // left: KxN (K cols, N rows), right: MxK (M cols, K rows) → result: MxN
+      uint32_t resId2 = inst.resultId();
+      uint32_t leftId = inst.word(3);
+      uint32_t rightId = inst.word(4);
+      const spirv::Type* resTy = spv->getType(inst.resultType());
+      const spirv::Type* leftTy = spv->getType(inst.word(1)); // result type used for dims
+      // Get left matrix type from operand
+      // We need to figure out K from the left matrix
+      if (resTy && resTy->kind == spirv::TYPE_MATRIX) {
+         unsigned M = resTy->componentCount; // result columns
+         const spirv::Type* resColTy = spv->getType(resTy->elementTypeId);
+         unsigned N = resColTy ? resColTy->componentCount : 1; // result rows
+         // K = left columns = right rows
+         // We can infer K from the left operand type
+         // But we might not have it easily... use the right matrix
+         // Right is MxK, so right has M columns of K components each
+         // Actually in SPIR-V, matrices store columns. Left is K cols of N rows each.
+         // For simplicity, assume square or try to get K from one of the operands
+         // We'll get K from ssaValues - count components of a column
+         unsigned K = N; // default assumption
+         // Try to get from left operand: left has K*N components stored column-major
+         auto lit = ssaValues.find(leftId);
+         if (lit != ssaValues.end() && lit->second.size() > N)
+            K = (unsigned)lit->second.size() / N;
+
+         for (unsigned col = 0; col < M; col++) {
+            for (unsigned row = 0; row < N; row++) {
+               Value *sum = nullptr;
+               for (unsigned k = 0; k < K; k++) {
+                  // left[k][row] * right[col][k]
+                  Value *a = getSSAComponent(leftId, k * N + row);
+                  Value *b = getSSAComponent(rightId, col * K + k);
+                  if (!a) a = loadImm(nullptr, 0.0f);
+                  if (!b) b = loadImm(nullptr, 0.0f);
+                  Value *prod = getSSA();
+                  mkOp2(OP_MUL, TYPE_F32, prod, a, b);
+                  if (sum) {
+                     Value *tmp = getSSA();
+                     mkOp2(OP_ADD, TYPE_F32, tmp, sum, prod);
+                     sum = tmp;
+                  } else {
+                     sum = prod;
+                  }
+               }
+               setSSAComponent(resId2, col * N + row, sum);
+            }
+         }
+      }
+      break;
+   }
 
    default:
-      fprintf(stderr, "SPIR-V: unhandled opcode %u\n", inst.opcode);
-      break;
+      fprintf(stderr, "SPIR-V: unhandled opcode %u — aborting conversion\n", inst.opcode);
+      return false;
    }
 
    return true;
@@ -2772,29 +3218,16 @@ Converter::run()
       }
    }
 
-   // 8. Export fragment shader outputs
-   if (prog->getType() == Program::TYPE_FRAGMENT) {
-      // Make sure we're in the last basic block
-      setPosition(leave, true);
-      exportOutputs();
-   }
-
-   // 9. Ensure control flow reaches the exit block
-   if (bb != leave && prog->getType() != Program::TYPE_FRAGMENT) {
+   // 8. Connect last instruction block to leave block
+   if (bb != leave) {
       mkFlow(OP_BRA, leave, CC_ALWAYS, nullptr);
       bb->cfg.attach(&leave->cfg, Graph::Edge::TREE);
    }
 
-   // For fragment shaders, connect last instruction block to leave
-   if (prog->getType() == Program::TYPE_FRAGMENT && bb != leave) {
-      // The exports are already in leave, just connect
-      BasicBlock *lastBB = bb;
+   // 9. Export fragment shader outputs in the leave block
+   if (prog->getType() == Program::TYPE_FRAGMENT) {
       setPosition(leave, true);
-      // Re-export if we moved
-      if (lastBB != entry) {
-         mkFlow(OP_BRA, leave, CC_ALWAYS, nullptr);
-         lastBB->cfg.attach(&leave->cfg, Graph::Edge::TREE);
-      }
+      exportOutputs();
    }
 
    return true;

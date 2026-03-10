@@ -57,6 +57,10 @@ bool uam_compile_dksh(uam_compiler *compiler, const char *glsl) {
     return reinterpret_cast<DekoCompiler *>(compiler)->CompileGlsl(glsl);
 }
 
+bool uam_compile_glslang(uam_compiler *compiler, const char *glsl) {
+    return reinterpret_cast<DekoCompiler *>(compiler)->CompileGlslViaGlslang(glsl);
+}
+
 bool uam_compile_spirv(uam_compiler *compiler, const void *spirv_data, size_t spirv_size) {
     if (!spirv_data || spirv_size < 20 || (spirv_size % 4) != 0)
         return false;

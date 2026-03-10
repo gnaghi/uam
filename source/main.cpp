@@ -13,7 +13,10 @@ static int usage(const char* prog)
 		"  -t, --tgsi=<file>  Specifies the file to which output intermediary TGSI code\n"
 		"  -s, --stage=<name> Specifies the pipeline stage of the shader\n"
 		"                     (vert, tess_ctrl, tess_eval, geom, frag, comp)\n"
-		"  -i, --input-format=<fmt>  Input format: glsl (default) or spirv\n"
+		"  -i, --input-format=<fmt>  Input format: glsl (default), spirv, or glslang\n"
+		"                     glsl: Mesa frontend (default)\n"
+		"                     glslang: glslang frontend (GLSL -> SPIR-V -> NV50_IR)\n"
+		"                     spirv: direct SPIR-V input\n"
 		"                     Auto-detected from file content if not specified\n"
 		"  -v, --version      Displays version information\n"
 		, prog);
@@ -102,16 +105,19 @@ int main(int argc, char* argv[])
 	fileData[fsize] = 0;
 
 	// Determine input format: auto-detect SPIR-V magic if not specified
-	bool isSPIRV = false;
+	// 0 = glsl (mesa), 1 = spirv, 2 = glslang
+	int inputMode = 0;
 	if (inputFormat)
 	{
 		if (strcmp(inputFormat, "spirv") == 0)
-			isSPIRV = true;
+			inputMode = 1;
 		else if (strcmp(inputFormat, "glsl") == 0)
-			isSPIRV = false;
+			inputMode = 0;
+		else if (strcmp(inputFormat, "glslang") == 0)
+			inputMode = 2;
 		else
 		{
-			fprintf(stderr, "Unrecognized input format: `%s' (use glsl or spirv)\n", inputFormat);
+			fprintf(stderr, "Unrecognized input format: `%s' (use glsl, glslang, or spirv)\n", inputFormat);
 			delete[] fileData;
 			return EXIT_FAILURE;
 		}
@@ -121,13 +127,13 @@ int main(int argc, char* argv[])
 		uint32_t magic;
 		memcpy(&magic, fileData, sizeof(magic));
 		if (magic == SPIRV_MAGIC)
-			isSPIRV = true;
+			inputMode = 1;
 	}
 
 	DekoCompiler compiler{stage};
 	bool rc;
 
-	if (isSPIRV)
+	if (inputMode == 1)
 	{
 		if (fsize < 20 || (fsize % 4) != 0)
 		{
@@ -137,6 +143,10 @@ int main(int argc, char* argv[])
 		}
 		rc = compiler.CompileSpirv(reinterpret_cast<const uint32_t*>(fileData), fsize / 4);
 	}
+	else if (inputMode == 2)
+	{
+		rc = compiler.CompileGlslViaGlslang(fileData);
+	}
 	else
 	{
 		rc = compiler.CompileGlsl(fileData);
@@ -145,7 +155,14 @@ int main(int argc, char* argv[])
 	delete[] fileData;
 
 	if (!rc)
+	{
+		const char *errLog = compiler.GetErrorLog();
+		if (errLog && errLog[0])
+			fprintf(stderr, "Compilation failed:\n%s\n", errLog);
+		else
+			fprintf(stderr, "Compilation failed (no error log)\n");
 		return EXIT_FAILURE;
+	}
 
 	if (outFile)
 		compiler.OutputDksh(outFile);
@@ -153,7 +170,7 @@ int main(int argc, char* argv[])
 	if (rawFile)
 		compiler.OutputRawCode(rawFile);
 
-	if (tgsiFile && !isSPIRV)
+	if (tgsiFile && inputMode == 0)
 		compiler.OutputTgsi(tgsiFile);
 
 	return EXIT_SUCCESS;

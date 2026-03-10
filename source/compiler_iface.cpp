@@ -328,6 +328,7 @@ DekoCompiler::DekoCompiler(pipeline_stage stage, int optLevel) :
 	m_info.assignSlots = nvc0_program_assign_varying_slots;
 
 	glsl_frontend_init();
+	glslang_fe_init();
 }
 
 DekoCompiler::~DekoCompiler()
@@ -335,6 +336,7 @@ DekoCompiler::~DekoCompiler()
 	if (m_glsl)
 		glsl_program_free(m_glsl);
 
+	glslang_fe_exit();
 	glsl_frontend_exit();
 }
 
@@ -385,6 +387,28 @@ bool DekoCompiler::CompileGlsl(const char* glsl)
 	RetrieveAndPadCode();
 	GenerateHeaders();
 	return true;
+}
+
+bool DekoCompiler::CompileGlslViaGlslang(const char* glsl)
+{
+	m_errorLog.clear();
+
+	/* Use glslang to compile GLSL → SPIR-V */
+	uint32_t *spvWords = nullptr;
+	size_t spvWordCount = 0;
+	char *errorMsg = nullptr;
+
+	if (!glslang_fe_compile(glsl, m_stage, &spvWords, &spvWordCount, &errorMsg)) {
+		m_errorLog = errorMsg ? errorMsg : "glslang compilation failed";
+		free(errorMsg);
+		return false;
+	}
+	free(errorMsg);
+
+	/* Feed SPIR-V into existing SPIR-V pipeline */
+	bool result = CompileSpirv(spvWords, spvWordCount);
+	free(spvWords);
+	return result;
 }
 
 bool DekoCompiler::CompileSpirv(const uint32_t* words, size_t wordCount)

@@ -34,9 +34,14 @@ uam_compiler *uam_create_compiler(DkStage stage);
 uam_compiler *uam_create_compiler_ex(DkStage stage, int opt_level);
 void uam_free_compiler(uam_compiler *compiler);
 
-// Compiles the GLSL codes
+// Compiles GLSL using Mesa frontend (original path)
 // Returns true on success, false otherwise
 bool uam_compile_dksh(uam_compiler *compiler, const char *glsl);
+
+// Compiles GLSL using glslang frontend (GLSL -> SPIR-V -> NV50_IR)
+// This path supports more GLSL constructs than the Mesa frontend
+// Returns true on success, false otherwise
+bool uam_compile_glslang(uam_compiler *compiler, const char *glsl);
 
 // Compiles a SPIR-V binary to DKSH
 // spirv_data: pointer to SPIR-V binary (must start with SPIR-V magic)
