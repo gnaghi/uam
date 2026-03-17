@@ -43,6 +43,14 @@ class DekoCompiler
 	glsl_sampler_info_t m_samplers[GLSL_SAMPLER_MAX];
 	int m_numSamplers;
 
+	/* Vertex input (attribute) metadata */
+	glsl_input_info_t m_inputs[GLSL_INPUT_MAX];
+	int m_numInputs;
+
+	/* Attribute bindings (from glBindAttribLocation) */
+	glsl_attrib_binding_t m_attribBindings[GLSL_ATTRIB_BINDING_MAX];
+	int m_numAttribBindings;
+
 	void RetrieveAndPadCode();
 	void GenerateHeaders();
 
@@ -78,4 +86,13 @@ public:
 	const glsl_sampler_info_t* GetSamplerInfo(int index) const {
 		return (index >= 0 && index < m_numSamplers) ? &m_samplers[index] : nullptr;
 	}
+
+	/* Vertex input (attribute) metadata accessors */
+	int GetNumInputs() const { return m_numInputs; }
+	const glsl_input_info_t* GetInputInfo(int index) const {
+		return (index >= 0 && index < m_numInputs) ? &m_inputs[index] : nullptr;
+	}
+
+	/* Attribute binding (call before CompileGlsl) */
+	void SetAttribBinding(const char *name, int location);
 };

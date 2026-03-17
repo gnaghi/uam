@@ -38,6 +38,24 @@ static uint32_t s_constbuf_size = 0;
 static glsl_sampler_info_t s_samplers[GLSL_SAMPLER_MAX];
 static int s_num_samplers = 0;
 
+/* Vertex input (attribute) metadata — populated during glsl_program_create() */
+static glsl_input_info_t s_inputs[GLSL_INPUT_MAX];
+static int s_num_inputs = 0;
+
+/* Attribute bindings — set by caller before glsl_program_create() */
+static glsl_attrib_binding_t s_attrib_bindings[GLSL_ATTRIB_BINDING_MAX];
+static int s_num_attrib_bindings = 0;
+
+void glsl_frontend_set_attrib_bindings(const glsl_attrib_binding_t *bindings, int count)
+{
+	s_num_attrib_bindings = 0;
+	if (!bindings || count <= 0) return;
+	if (count > GLSL_ATTRIB_BINDING_MAX) count = GLSL_ATTRIB_BINDING_MAX;
+	for (int i = 0; i < count; i++)
+		s_attrib_bindings[i] = bindings[i];
+	s_num_attrib_bindings = count;
+}
+
 class dead_variable_visitor : public ir_hierarchical_visitor {
 public:
 	dead_variable_visitor()
@@ -254,7 +272,12 @@ initialize_context(struct gl_context *ctx, gl_api api)
 		pc->MaxAluInstructions = pc->MaxNativeAluInstructions = 16384;
 		pc->MaxTexInstructions = pc->MaxNativeTexInstructions = 16384;
 		pc->MaxTexIndirections = pc->MaxNativeTexIndirections = 16384;
-		pc->MaxAttribs = pc->MaxNativeAttribs = sh == PIPE_SHADER_VERTEX ? 16 : (sh == PIPE_SHADER_FRAGMENT ? (0x1f0 / 16) : (0x200 / 16));
+		pc->MaxNativeAttribs = sh == PIPE_SHADER_VERTEX ? 16 : (sh == PIPE_SHADER_FRAGMENT ? (0x1f0 / 16) : (0x200 / 16));
+		/* MaxAttribs raised to 32 for vertex shaders so Mesa accepts GLES2
+		 * aliased-inactive-attribute shaders (dEQP bind_aliasing tests declare
+		 * 2×GL_MAX_VERTEX_ATTRIBS attributes with half inactive at shared
+		 * locations).  Hardware limit stays 16 via MaxNativeAttribs. */
+		pc->MaxAttribs = sh == PIPE_SHADER_VERTEX ? 32 : pc->MaxNativeAttribs;
 		pc->MaxTemps = pc->MaxNativeTemps = 128;
 		pc->MaxAddressRegs = pc->MaxNativeAddressRegs = sh == PIPE_SHADER_VERTEX ? 1 : 0;
 		pc->MaxUniformComponents = 65536/4;
@@ -359,7 +382,7 @@ void glsl_frontend_log(const char *fmt, ...)
 {
 	va_list args;
 
-	/* Write to stderr (backward compatible) */
+	/* Write to stderr */
 	va_start(args, fmt);
 	vfprintf(stderr, fmt, args);
 	va_end(args);
@@ -448,7 +471,24 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 			goto _fail;
 	}
 	shader->Stage = _mesa_shader_enum_to_shader_stage(shader->Type);
-	shader->Source = source;
+
+	/* GLES2 spec: shaders without #version are implicitly ES 1.00.
+	 * Mesa with API_OPENGL_CORE requires an explicit #version directive
+	 * to recognize ES keywords (attribute, varying, etc.), so prepend
+	 * "#version 100\n" when the source lacks a #version directive. */
+	{
+		const char *p = source;
+		while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+		if (strncmp(p, "#version", 8) != 0) {
+			size_t len = strlen(source);
+			char *patched = ralloc_array(prg, char, len + 14);
+			memcpy(patched, "#version 100\n", 13);
+			memcpy(patched + 13, source, len + 1);
+			shader->Source = patched;
+		} else {
+			shader->Source = source;
+		}
+	}
 
 	// "Compile" the shader
 	_mesa_glsl_compile_shader(&gl_ctx, shader, false, false, true);
@@ -481,6 +521,13 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 		}
 	}
 
+	/* Apply attribute bindings from glBindAttribLocation before linking */
+	for (int i = 0; i < s_num_attrib_bindings; i++) {
+		prg->AttributeBindings->put(
+			VERT_ATTRIB_GENERIC0 + s_attrib_bindings[i].location,
+			s_attrib_bindings[i].name);
+	}
+
 	// Link the shader
 	link_shaders(&gl_ctx, prg);
 	if (prg->data->LinkStatus != LINKING_SUCCESS)
@@ -504,6 +551,32 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 
 		// Print IR
 		//_mesa_print_ir(stdout, linked_shader->ir, NULL);
+
+		/* Collect vertex input (attribute) metadata from linked shader IR.
+		 * Must be done BEFORE st_link_shader which may destroy IR nodes. */
+		s_num_inputs = 0;
+		if (stage == pipeline_stage_vertex) {
+			foreach_in_list(ir_instruction, node, linked_shader->ir) {
+				ir_variable *var = node->as_variable();
+				if (!var || var->data.mode != ir_var_shader_in)
+					continue;
+				/* Skip built-in inputs (gl_VertexID, etc.) */
+				if (var->data.location < (int)VERT_ATTRIB_GENERIC0)
+					continue;
+				if (s_num_inputs >= GLSL_INPUT_MAX)
+					break;
+
+				glsl_input_info_t *inp = &s_inputs[s_num_inputs];
+				strncpy(inp->name, var->name, GLSL_UNIFORM_MAX_NAME - 1);
+				inp->name[GLSL_UNIFORM_MAX_NAME - 1] = '\0';
+				inp->location = var->data.location - VERT_ATTRIB_GENERIC0;
+				inp->base_type = var->type->base_type;
+				inp->vector_elements = var->type->vector_elements;
+				inp->matrix_columns = var->type->matrix_columns;
+				inp->pad = 0;
+				s_num_inputs++;
+			}
+		}
 
 		// Do the TGSI conversion
 		if (!st_link_shader(&gl_ctx, prg))
@@ -590,15 +663,19 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 				/* Compute size: vec4-aligned rows × columns × array */
 				unsigned cols = storage->type->matrix_columns;
 				unsigned rows = storage->type->vector_elements;
-				unsigned elem_size = 4 * cols * rows; /* each component is 4 bytes */
+				unsigned count = storage->array_elements ? storage->array_elements : 1;
+				unsigned elem_size;
 				if (cols > 1) {
 					/* Matrices: each column is padded to vec4 (16 bytes) */
 					elem_size = 16 * cols;
+				} else if (count > 1) {
+					/* Array elements: each occupies a full vec4 (16 bytes)
+					 * due to pad_and_align=true in _mesa_add_parameter */
+					elem_size = 16;
 				} else {
-					/* Vectors: padded to 4*vector_elements */
+					/* Scalar/vector non-array: tight packing */
 					elem_size = 4 * rows;
 				}
-				unsigned count = storage->array_elements ? storage->array_elements : 1;
 				u->size_bytes = elem_size * count;
 
 				uint32_t end = u->offset + u->size_bytes;
@@ -609,7 +686,11 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 			}
 		}
 
-		/* Collect sampler metadata from UniformStorage */
+		/* Collect sampler metadata from UniformStorage.
+		 * Mesa reports sampler arrays as a single gl_uniform_storage entry
+		 * with name "s" and array_elements=N.  Expand into individual entries
+		 * "s[0]", "s[1]", ... so SwitchGLES can look up each element by name.
+		 * Each array element gets a sequential binding (base + i). */
 		s_num_samplers = 0;
 		for (unsigned i = 0; i < prg->data->NumUniformStorage && s_num_samplers < GLSL_SAMPLER_MAX; i++)
 		{
@@ -617,24 +698,40 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 			if (storage->builtin || storage->hidden) continue;
 			if (!storage->type->is_sampler()) continue;
 
-			glsl_sampler_info_t *s = &s_samplers[s_num_samplers];
-			strncpy(s->name, storage->name, GLSL_UNIFORM_MAX_NAME - 1);
-			s->name[GLSL_UNIFORM_MAX_NAME - 1] = '\0';
-			/* Find the binding from opaque index (check all stages) */
-			s->binding = -1;
+			/* Find the base binding from opaque index (check all stages) */
+			int base_binding = -1;
 			for (int st = 0; st < MESA_SHADER_STAGES; st++) {
 				if (storage->opaque[st].active) {
-					s->binding = storage->opaque[st].index;
+					base_binding = storage->opaque[st].index;
 					break;
 				}
 			}
 			/* Determine sampler type */
-			s->type = 0; /* default: sampler2D */
+			uint8_t stype = 0; /* default: sampler2D */
 			if (storage->type->sampler_dimensionality == GLSL_SAMPLER_DIM_CUBE)
-				s->type = 1; /* samplerCube */
+				stype = 1; /* samplerCube */
 
-			s_num_samplers++;
+			unsigned count = storage->array_elements ? storage->array_elements : 1;
+			if (count == 1) {
+				/* Non-array sampler: store as-is */
+				glsl_sampler_info_t *s = &s_samplers[s_num_samplers];
+				strncpy(s->name, storage->name, GLSL_UNIFORM_MAX_NAME - 1);
+				s->name[GLSL_UNIFORM_MAX_NAME - 1] = '\0';
+				s->binding = base_binding;
+				s->type = stype;
+				s_num_samplers++;
+			} else {
+				/* Array sampler: expand to individual entries */
+				for (unsigned e = 0; e < count && s_num_samplers < GLSL_SAMPLER_MAX; e++) {
+					glsl_sampler_info_t *s = &s_samplers[s_num_samplers];
+					snprintf(s->name, GLSL_UNIFORM_MAX_NAME, "%s[%u]", storage->name, e);
+					s->binding = (base_binding >= 0) ? base_binding + (int)e : -1;
+					s->type = stype;
+					s_num_samplers++;
+				}
+			}
 		}
+
 	}
 
 	return prg;
@@ -744,4 +841,18 @@ const glsl_sampler_info_t* glsl_program_get_sampler_info(glsl_program prg, int i
 	if (index < 0 || index >= s_num_samplers)
 		return nullptr;
 	return &s_samplers[index];
+}
+
+int glsl_program_get_num_inputs(glsl_program prg)
+{
+	(void)prg;
+	return s_num_inputs;
+}
+
+const glsl_input_info_t* glsl_program_get_input_info(glsl_program prg, int index)
+{
+	(void)prg;
+	if (index < 0 || index >= s_num_inputs)
+		return nullptr;
+	return &s_inputs[index];
 }

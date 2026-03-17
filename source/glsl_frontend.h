@@ -39,6 +39,16 @@ void glsl_frontend_reset_log();
 const char* glsl_frontend_get_log();
 void glsl_frontend_log(const char *fmt, ...);
 
+/* Attribute binding (set before glsl_program_create for glBindAttribLocation support) */
+#define GLSL_ATTRIB_BINDING_MAX 32
+
+typedef struct {
+	char name[GLSL_UNIFORM_MAX_NAME];
+	int location;
+} glsl_attrib_binding_t;
+
+void glsl_frontend_set_attrib_bindings(const glsl_attrib_binding_t *bindings, int count);
+
 glsl_program glsl_program_create(const char* source, pipeline_stage stage);
 const tgsi_token* glsl_program_get_tokens(glsl_program prg, unsigned int& num_tokens);
 void* glsl_program_get_constant_buffer(glsl_program prg, unsigned int& out_size);
@@ -62,3 +72,18 @@ typedef struct {
 
 int glsl_program_get_num_samplers(glsl_program prg);
 const glsl_sampler_info_t* glsl_program_get_sampler_info(glsl_program prg, int index);
+
+/* Vertex input (attribute) metadata — populated for vertex shaders */
+#define GLSL_INPUT_MAX 32  /* up to 32 declared attributes (aliasing may exceed 16) */
+
+typedef struct {
+	char name[GLSL_UNIFORM_MAX_NAME];
+	int location;        /* Generic attribute location (0-based, from layout or auto) */
+	uint8_t base_type;   /* GLSL_TYPE_FLOAT, GLSL_TYPE_INT, GLSL_TYPE_BOOL */
+	uint8_t vector_elements; /* 1-4 */
+	uint8_t matrix_columns;  /* 1 for scalars/vectors, 2-4 for matrices */
+	uint8_t pad;
+} glsl_input_info_t;
+
+int glsl_program_get_num_inputs(glsl_program prg);
+const glsl_input_info_t* glsl_program_get_input_info(glsl_program prg, int index);

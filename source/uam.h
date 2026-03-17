@@ -35,6 +35,10 @@ uam_compiler *uam_create_compiler(DkStage stage);
 uam_compiler *uam_create_compiler_ex(DkStage stage, int opt_level);
 void uam_free_compiler(uam_compiler *compiler);
 
+// Set attribute binding before compilation (for glBindAttribLocation support).
+// Must be called BEFORE uam_compile_dksh().
+void uam_set_attrib_binding(uam_compiler *compiler, const char *name, int location);
+
 // Compiles GLSL using Mesa frontend
 // Returns true on success, false otherwise
 bool uam_compile_dksh(uam_compiler *compiler, const char *glsl);
@@ -66,7 +70,7 @@ typedef struct {
     const char *name;         // Uniform name
     uint32_t offset;          // Byte offset in driver constbuf
     uint32_t size_bytes;      // Total size in bytes
-    uint8_t  base_type;       // 0=uint, 1=int, 2=float, 6=bool, 7=sampler
+    uint8_t  base_type;       // Mesa glsl_base_type: 0=uint, 1=int, 2=float, 11=bool, 12=sampler
     uint8_t  vector_elements; // 1-4
     uint8_t  matrix_columns;  // 1 for scalars/vectors, 2-4 for matrices
     uint8_t  is_sampler;      // 1 if sampler type
@@ -96,6 +100,23 @@ int uam_get_num_samplers(const uam_compiler *compiler);
 // Gets sampler info by index (0..num_samplers-1)
 // Returns false if index out of range
 bool uam_get_sampler_info(const uam_compiler *compiler, int index, uam_sampler_info_t *info);
+
+// Vertex input (attribute) metadata (for vertex shaders)
+typedef struct {
+    const char *name;         // Attribute name
+    int location;             // Generic attribute location (0-based)
+    uint8_t base_type;        // Mesa glsl_base_type: 0=uint, 1=int, 2=float, 11=bool
+    uint8_t vector_elements;  // 1-4
+    uint8_t matrix_columns;   // 1 for scalars/vectors, 2-4 for matrices
+    uint8_t pad;
+} uam_input_info_t;
+
+// Gets the number of vertex inputs (attributes) in the compiled shader
+int uam_get_num_inputs(const uam_compiler *compiler);
+
+// Gets vertex input info by index (0..num_inputs-1)
+// Returns false if index out of range
+bool uam_get_input_info(const uam_compiler *compiler, int index, uam_input_info_t *info);
 
 // Returns true if driver constbuf was remapped from c[0] to UBO 0 (c[1]).
 // When true, SwitchGLES must bind a UBO at id=0 with uniform data.

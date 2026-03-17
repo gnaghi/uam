@@ -252,7 +252,9 @@ nvc0_spirv_assign_varying_slots(struct nv50_ir_prog_info *info)
 DekoCompiler::DekoCompiler(pipeline_stage stage, int optLevel) :
 	m_stage{stage}, m_glsl{}, m_tgsi{}, m_tgsiNumTokens{}, m_info{}, m_code{}, m_codeSize{},
 	m_nvsh{}, m_dkph{}, m_uniforms{}, m_numUniforms{0}, m_constbufSize{0},
-	m_samplers{}, m_numSamplers{0}
+	m_samplers{}, m_numSamplers{0},
+	m_inputs{}, m_numInputs{0},
+	m_attribBindings{}, m_numAttribBindings{0}
 {
 	m_nvsh.version = 3;
 	m_nvsh.sass_version = 3;
@@ -339,10 +341,24 @@ DekoCompiler::~DekoCompiler()
 	glsl_frontend_exit();
 }
 
+void DekoCompiler::SetAttribBinding(const char *name, int location)
+{
+	if (m_numAttribBindings >= GLSL_ATTRIB_BINDING_MAX) return;
+	glsl_attrib_binding_t &b = m_attribBindings[m_numAttribBindings++];
+	strncpy(b.name, name, GLSL_UNIFORM_MAX_NAME - 1);
+	b.name[GLSL_UNIFORM_MAX_NAME - 1] = '\0';
+	b.location = location;
+}
+
 bool DekoCompiler::CompileGlsl(const char* glsl)
 {
 	m_errorLog.clear();
 	glsl_frontend_reset_log();
+
+	/* Pass attribute bindings to frontend before compilation */
+	glsl_frontend_set_attrib_bindings(
+		m_numAttribBindings > 0 ? m_attribBindings : nullptr,
+		m_numAttribBindings);
 
 	m_glsl = glsl_program_create(glsl, m_stage);
 	if (!m_glsl)
@@ -366,6 +382,14 @@ bool DekoCompiler::CompileGlsl(const char* glsl)
 		const glsl_sampler_info_t *src = glsl_program_get_sampler_info(m_glsl, i);
 		if (src)
 			m_samplers[i] = *src;
+	}
+
+	/* Capture vertex input (attribute) metadata */
+	m_numInputs = glsl_program_get_num_inputs(m_glsl);
+	for (int i = 0; i < m_numInputs && i < GLSL_INPUT_MAX; i++) {
+		const glsl_input_info_t *src = glsl_program_get_input_info(m_glsl, i);
+		if (src)
+			m_inputs[i] = *src;
 	}
 
 	m_tgsi = glsl_program_get_tokens(m_glsl, m_tgsiNumTokens);
