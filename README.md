@@ -83,11 +83,25 @@ if (uam_compile_dksh(compiler, glsl)) {
     fprintf(stderr, "Compilation failed:\n%s\n", log);
 }
 
+// --- Attribute bindings (for GLES2 aliased attributes) ---
+uam_set_attrib_binding(compiler, "a_position", 0);
+uam_set_attrib_binding(compiler, "a_color", 1);
+
+// --- ES 1.00 shader metadata (after successful compilation) ---
+int num_uniforms = uam_get_num_uniforms(compiler);
+for (int i = 0; i < num_uniforms; i++) {
+    uam_uniform_info_t info;
+    uam_get_uniform_info(compiler, i, &info);
+    // info.name, info.offset, info.size_bytes, info.base_type, etc.
+}
+int num_samplers = uam_get_num_samplers(compiler);
+bool remapped = uam_is_constbuf_remapped(compiler);
+int dr_offset = uam_get_depth_range_offset(compiler); // -1 if not used
+
 // Cleanup
 uam_free_compiler(compiler);
 
 // --- SPIR-V compilation ---
-// spirv_data is a pointer to a SPIR-V binary, spirv_size is its size in bytes
 if (uam_compile_spirv(compiler, spirv_data, spirv_size)) {
     size_t size = uam_get_code_size(compiler);
     void *dksh = malloc(size);
@@ -110,13 +124,20 @@ if (uam_compile_spirv(compiler, spirv_data, spirv_size)) {
 | `uam_get_error_log(compiler)` | Get error/warning log from last compilation |
 | `uam_get_num_gprs(compiler)` | Get GPU register count used by compiled shader |
 | `uam_get_version(major, minor, micro)` | Get library version |
+| `uam_set_attrib_binding(compiler, name, loc)` | Set attribute location binding before compilation |
+| `uam_get_num_uniforms(compiler)` | Get number of driver constbuf uniforms (ES 1.00) |
+| `uam_get_uniform_info(compiler, index, info)` | Get uniform metadata (name, offset, type, size) |
+| `uam_get_num_samplers(compiler)` | Get number of samplers (ES 1.00) |
+| `uam_get_sampler_info(compiler, index, info)` | Get sampler metadata (name, binding) |
+| `uam_is_constbuf_remapped(compiler)` | True if driver constbuf remapped c[0]→c[1] |
+| `uam_get_depth_range_offset(compiler)` | Byte offset of gl_DepthRange in constbuf (-1 if unused) |
+| `uam_get_num_inputs(compiler)` | Get number of vertex shader inputs |
+| `uam_get_input_info(compiler, index, info)` | Get input attribute metadata (name, location) |
 
 ## GLSL requirements
 
-- Shaders must use **GLSL 4.60** syntax (`#version 460`)
-- UBO, SSBO, sampler and image bindings must be **explicit**: `layout(binding = N)`
-- Default uniforms outside UBO blocks are **not supported** (will produce an error)
-- `layout(location = N)` is required for vertex inputs and varying I/O
+- **GLSL 4.60** (`#version 460`): UBO/SSBO/sampler bindings must be explicit (`layout(binding = N)`), `layout(location = N)` required for vertex inputs and varying I/O
+- **GLSL ES 1.00** (`#version 100` or no `#version`): fully supported via Mesa direct compilation. Bare uniforms are mapped to the driver constbuf with metadata accessible via `uam_get_num_uniforms()` / `uam_get_uniform_info()`. Samplers are auto-bound sequentially. When no `#version` is present, `#version 100` is prepended automatically with `#line 1` to preserve `__LINE__` numbering.
 - The `DEKO3D` preprocessor symbol is defined (value 100)
 
 ## SPIR-V support
@@ -133,7 +154,7 @@ See [docs/SPIRV_SUPPORT.md](docs/SPIRV_SUPPORT.md) for full details.
 
 - UBO, SSBO, sampler and image bindings are **required to be explicit** (i.e. `layout (binding = N)`), and they have a one-to-one correspondence with deko3d bindings. Failure to specify explicit bindings will result in an error.
 - There is support for 16 UBOs, 16 SSBOs, 32 "samplers" (combined image+sampler handle), and 8 images for each and every shader stage; with binding IDs ranging from zero to the corresponding limit minus one. However note that due to hardware limitations, only compute stage UBO bindings 0-5 are natively supported, while 6-15 are emulated as "SSBOs".
-- Default uniforms outside UBO blocks (which end up in the internal driver const buffer) are detected, however they are reported as an error due to lack of support in both DKSH and deko3d for retrieving the location of and setting these uniforms.
+- Default uniforms outside UBO blocks are fully supported for **ES 1.00 shaders** (Mesa maps them to the driver constbuf; metadata is exposed via `uam_get_num_uniforms()`). For **GLSL 4.60**, default uniforms remain unsupported and produce an error — use explicit UBO blocks instead.
 - Internal deko3d constbuf layout and numbering schemes are used, as opposed to nouveau's.
 - `gl_FragCoord` always uses the Y axis convention specified in the flags during the creation of a deko3d device. `layout (origin_upper_left)` has no effect whatsoever and produces a warning, while `layout (pixel_center_integer)` is not supported at all and produces an error.
 - Integer divisions and modulo operations with non-constant divisors decay to floating point division, and generate a warning. Well written shaders should avoid these operations for performance and accuracy reasons. (Also note that unmodified nouveau, in order to comply with the GL standard, emulates integer division/module with a software routine that has been removed in UAM)
