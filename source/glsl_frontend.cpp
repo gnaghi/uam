@@ -689,6 +689,53 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 			}
 		}
 
+		/* Fallback: scan UniformStorage for uniforms not found via Parameters.
+		 * Mesa may exclude boolean uniforms from the parameter list (lowered to int). */
+		for (unsigned i = 0; i < prg->data->NumUniformStorage && s_num_uniforms < GLSL_UNIFORM_MAX; i++)
+		{
+			gl_uniform_storage *storage = &prg->data->UniformStorage[i];
+			if (storage->builtin || storage->hidden) continue;
+			if (storage->type->is_sampler()) continue;
+			/* Check if already collected */
+			bool already = false;
+			for (int j = 0; j < s_num_uniforms; j++) {
+				if (strcmp(s_uniforms[j].name, storage->name) == 0) {
+					already = true;
+					break;
+				}
+			}
+			if (already) continue;
+			/* Find offset in parameter list */
+			int param_offset = -1;
+			for (unsigned pi = 0; pi < pl->NumParameters; pi++) {
+				if (strcmp(pl->Parameters[pi].Name, storage->name) == 0) {
+					param_offset = (int)(4 * pl->ParameterValueOffset[pi]);
+					break;
+				}
+			}
+			if (param_offset < 0) continue;
+			glsl_uniform_info_t *u = &s_uniforms[s_num_uniforms];
+			strncpy(u->name, storage->name, GLSL_UNIFORM_MAX_NAME - 1);
+			u->name[GLSL_UNIFORM_MAX_NAME - 1] = '\0';
+			u->offset = (uint32_t)param_offset;
+			u->base_type = storage->type->base_type;
+			u->vector_elements = storage->type->vector_elements;
+			u->matrix_columns = storage->type->matrix_columns;
+			u->is_sampler = 0;
+			u->array_elements = storage->array_elements;
+			unsigned cols = storage->type->matrix_columns;
+			unsigned rows = storage->type->vector_elements;
+			unsigned count = storage->array_elements ? storage->array_elements : 1;
+			unsigned elem_size;
+			if (cols > 1) elem_size = 16 * cols;
+			else if (count > 1) elem_size = 16;
+			else elem_size = 4 * rows;
+			u->size_bytes = elem_size * count;
+			uint32_t end = u->offset + u->size_bytes;
+			if (end > s_constbuf_size) s_constbuf_size = end;
+			s_num_uniforms++;
+		}
+
 		/* Scan parameter list for gl_DepthRange state variable.
 		 * Mesa maps gl_DepthRange to STATE_DEPTH_RANGE as a vec4 in the
 		 * driver constbuf: [near, far, diff, unused]. Record the byte offset
