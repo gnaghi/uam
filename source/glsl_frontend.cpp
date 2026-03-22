@@ -279,7 +279,9 @@ initialize_context(struct gl_context *ctx, gl_api api)
 		/* MaxAttribs=32 for vertex shaders: allows GLES2 aliased-inactive
 		 * attribute shaders (2×GL_MAX_VERTEX_ATTRIBS).  Hardware limit stays
 		 * 16 via MaxNativeAttribs.  Do NOT raise beyond 32: NV50_IR will
-		 * generate shaders with >16 native inputs, crashing the GPU. */
+		 * generate shaders with >16 native inputs, crashing the GPU.
+		 * Note: gl_MaxVertexAttribs will be 32 in shader, vs 16 from
+		 * glGetIntegerv — this causes 2 dEQP test failures (accepted). */
 		pc->MaxAttribs = sh == PIPE_SHADER_VERTEX ? 32 : pc->MaxNativeAttribs;
 		pc->MaxTemps = pc->MaxNativeTemps = 128;
 		pc->MaxAddressRegs = pc->MaxNativeAddressRegs = sh == PIPE_SHADER_VERTEX ? 1 : 0;
