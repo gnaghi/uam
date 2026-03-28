@@ -487,8 +487,142 @@ bool DekoCompiler::CompileSpirv(const uint32_t* words, size_t wordCount)
 		fprintf(stderr, "%s", msg);
 	}
 
+	// Extract metadata from SPIR-V program for SDL_GPU reflection
+	m_numUniforms = 0;
+	m_numSamplers = 0;
+	m_numInputs = 0;
+	m_constbufSize = 0;
+	m_depthRangeOffset = -1;
 	m_data = nullptr;
 	m_dataSize = 0;
+
+	for (const auto& var : spvProg->allVariables) {
+		const spirv::DecorationData& deco = spvProg->getDecoration(var.id);
+		const spirv::Type* ptrType = spvProg->getType(var.typeId);
+		const spirv::Type* type = ptrType ? spvProg->getPointeeType(var.typeId) : nullptr;
+		const std::string& name = var.id < spvProg->names.size() ? spvProg->names[var.id] : "";
+
+		if (var.storageClass == SpvStorageClassUniformConstant && type) {
+			// Samplers (sampler2D, samplerCube, etc.)
+			if ((type->kind == spirv::TYPE_SAMPLED_IMAGE || type->kind == spirv::TYPE_IMAGE)
+			    && m_numSamplers < GLSL_SAMPLER_MAX) {
+				glsl_sampler_info_t& s = m_samplers[m_numSamplers];
+				memset(&s, 0, sizeof(s));
+				strncpy(s.name, name.c_str(), sizeof(s.name) - 1);
+				s.binding = deco.binding >= 0 ? deco.binding : m_numSamplers;
+				s.type = 0; // sampler2D default
+				if (type->kind == spirv::TYPE_SAMPLED_IMAGE || type->kind == spirv::TYPE_IMAGE) {
+					const spirv::Type* imgType = type->kind == spirv::TYPE_SAMPLED_IMAGE
+						? spvProg->getType(type->elementTypeId) : type;
+					if (imgType && imgType->dim == SpvDimCube)
+						s.type = 1; // samplerCube
+				}
+				m_numSamplers++;
+			}
+		}
+		else if (var.storageClass == SpvStorageClassUniform && type) {
+			// UBO members — flatten struct members into uniform array
+			if (type->kind == spirv::TYPE_STRUCT && deco.binding >= 0) {
+				uint32_t byteOffset = 0;
+				for (size_t mi = 0; mi < type->memberTypeIds.size() && m_numUniforms < GLSL_UNIFORM_MAX; mi++) {
+					const spirv::MemberDecorationData& mdeco = spvProg->getMemberDecoration(type->id, (uint32_t)mi);
+					uint32_t memberTypeId = type->memberTypeIds[mi];
+					const spirv::Type* mType = spvProg->getType(memberTypeId);
+					if (!mType) continue;
+
+					glsl_uniform_info_t& u = m_uniforms[m_numUniforms];
+					memset(&u, 0, sizeof(u));
+
+					// Name: struct_name.member_name or just member index
+					std::string mName;
+					auto it = spvProg->memberDecorations.find(type->id);
+					// Build name from struct member
+					char idxBuf[16];
+					snprintf(idxBuf, sizeof(idxBuf), "member%zu", mi);
+					mName = idxBuf;
+					// Check if we have a debug name for this member
+					// memberDecorations don't have names, use struct name + index
+
+					strncpy(u.name, mName.c_str(), sizeof(u.name) - 1);
+					u.offset = mdeco.offset >= 0 ? (uint32_t)mdeco.offset : byteOffset;
+					u.array_elements = 0;
+					u.is_sampler = 0;
+
+					// Determine type
+					if (mType->kind == spirv::TYPE_FLOAT) {
+						u.base_type = 6; // GLSL_TYPE_FLOAT
+						u.vector_elements = 1;
+						u.matrix_columns = 1;
+						u.size_bytes = 4;
+						byteOffset = u.offset + 4;
+					} else if (mType->kind == spirv::TYPE_VECTOR) {
+						u.base_type = 6;
+						u.vector_elements = mType->componentCount;
+						u.matrix_columns = 1;
+						u.size_bytes = mType->componentCount * 4;
+						byteOffset = u.offset + u.size_bytes;
+					} else if (mType->kind == spirv::TYPE_MATRIX) {
+						u.base_type = 6;
+						u.vector_elements = mType->componentCount;
+						u.matrix_columns = mType->componentCount;
+						u.size_bytes = mType->componentCount * mType->componentCount * 4;
+						byteOffset = u.offset + u.size_bytes;
+					} else if (mType->kind == spirv::TYPE_INT) {
+						u.base_type = mType->signedness ? 4 : 5; // INT / UINT
+						u.vector_elements = 1;
+						u.matrix_columns = 1;
+						u.size_bytes = 4;
+						byteOffset = u.offset + 4;
+					} else {
+						u.base_type = 6;
+						u.vector_elements = 1;
+						u.matrix_columns = 1;
+						u.size_bytes = spvProg->getTypeByteSize(memberTypeId);
+						byteOffset = u.offset + u.size_bytes;
+					}
+
+					if (byteOffset > m_constbufSize)
+						m_constbufSize = byteOffset;
+
+					m_numUniforms++;
+				}
+			}
+		}
+		else if (var.storageClass == SpvStorageClassInput && type && m_numInputs < GLSL_INPUT_MAX) {
+			// Vertex inputs
+			if (!deco.hasBuiltIn && deco.location >= 0) {
+				glsl_input_info_t& inp = m_inputs[m_numInputs];
+				memset(&inp, 0, sizeof(inp));
+				strncpy(inp.name, name.c_str(), sizeof(inp.name) - 1);
+				inp.location = deco.location;
+				if (type->kind == spirv::TYPE_FLOAT) {
+					inp.base_type = 6; // GLSL_TYPE_FLOAT
+					inp.vector_elements = 1;
+					inp.matrix_columns = 1;
+				} else if (type->kind == spirv::TYPE_VECTOR) {
+					inp.base_type = 6; // GLSL_TYPE_FLOAT
+					inp.vector_elements = type->componentCount;
+					inp.matrix_columns = 1;
+				} else if (type->kind == spirv::TYPE_INT) {
+					inp.base_type = type->signedness ? 4 : 5; // INT / UINT
+					inp.vector_elements = 1;
+					inp.matrix_columns = 1;
+				} else {
+					inp.base_type = 6;
+					inp.vector_elements = 4;
+					inp.matrix_columns = 1;
+				}
+				m_numInputs++;
+			}
+		}
+	}
+
+	// Build initial constbuf data from SPIR-V constants (if UBO has defaults)
+	if (m_constbufSize > 0) {
+		m_dataSize = (m_constbufSize + 255) & ~255u; // 256-byte align
+		m_data = calloc(1, m_dataSize);
+	}
+
 	RetrieveAndPadCode();
 	GenerateHeaders();
 
