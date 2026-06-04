@@ -1,4 +1,5 @@
 #include "compiler_iface.h"
+#include "uam.h"
 
 namespace
 {
@@ -991,6 +992,69 @@ void DekoCompiler::OutputTgsi(const char* tgsiFile)
 		tgsi_dump_to_file(m_tgsi, TGSI_DUMP_FLOAT_AS_HEX, f);
 		fclose(f);
 	}
+}
+
+bool DekoCompiler::OutputReflection(const char* reflFile) const
+{
+	FILE* f = fopen(reflFile, "wb");
+	if (!f)
+		return false;
+
+	uam_refl_header_t hdr = {};
+	memcpy(hdr.magic, UAM_REFL_MAGIC, sizeof(hdr.magic));
+	hdr.version            = UAM_REFL_VERSION;
+	hdr.stage              = (uint32_t)m_stage;
+	hdr.num_uniforms       = (uint32_t)m_numUniforms;
+	hdr.num_samplers       = (uint32_t)m_numSamplers;
+	hdr.num_inputs         = (uint32_t)m_numInputs;
+	hdr.constbuf_size      = m_constbufSize;
+	hdr.depth_range_offset = m_depthRangeOffset;
+	hdr.constbuf_data_size = m_dataSize;
+	hdr.flags              = IsConstbufRemapped() ? UAM_REFL_FLAG_CONSTBUF_REMAPPED : 0;
+	fwrite(&hdr, 1, sizeof(hdr), f);
+
+	for (int i = 0; i < m_numUniforms; i++)
+	{
+		const glsl_uniform_info_t& src = m_uniforms[i];
+		uam_refl_uniform_t rec = {};
+		strncpy(rec.name, src.name, UAM_REFL_MAX_NAME - 1);
+		rec.offset          = src.offset;
+		rec.size_bytes      = src.size_bytes;
+		rec.array_elements  = src.array_elements;
+		rec.base_type       = src.base_type;
+		rec.vector_elements = src.vector_elements;
+		rec.matrix_columns  = src.matrix_columns;
+		rec.is_sampler      = src.is_sampler;
+		fwrite(&rec, 1, sizeof(rec), f);
+	}
+
+	for (int i = 0; i < m_numSamplers; i++)
+	{
+		const glsl_sampler_info_t& src = m_samplers[i];
+		uam_refl_sampler_t rec = {};
+		strncpy(rec.name, src.name, UAM_REFL_MAX_NAME - 1);
+		rec.binding = src.binding;
+		rec.type    = src.type;
+		fwrite(&rec, 1, sizeof(rec), f);
+	}
+
+	for (int i = 0; i < m_numInputs; i++)
+	{
+		const glsl_input_info_t& src = m_inputs[i];
+		uam_refl_input_t rec = {};
+		strncpy(rec.name, src.name, UAM_REFL_MAX_NAME - 1);
+		rec.location        = src.location;
+		rec.base_type       = src.base_type;
+		rec.vector_elements = src.vector_elements;
+		rec.matrix_columns  = src.matrix_columns;
+		fwrite(&rec, 1, sizeof(rec), f);
+	}
+
+	if (m_dataSize && m_data)
+		fwrite(m_data, 1, m_dataSize, f);
+
+	fclose(f);
+	return true;
 }
 
 void DekoCompiler::OutputDkshToMemory(void *mem) const {

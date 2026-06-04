@@ -119,3 +119,13 @@ test_spirv_parser = executable(
 	install: false,
 )
 test('spirv_parser', test_spirv_parser)
+
+# Reflection sidecar (.refl) format tests (standalone, header-only — needs uam.h)
+test_reflection = executable(
+	'test_reflection',
+	files('tests/test_reflection.cpp'),
+	cpp_args: ['-DDESKTOP'],
+	include_directories: uam_incs,
+	install: false,
+)
+test('reflection', test_reflection)

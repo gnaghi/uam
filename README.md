@@ -47,6 +47,11 @@ uam -s vert -o output.dksh input.glsl
 # SPIR-V input (auto-detected from magic number, or explicit)
 uam -s vert -o output.dksh shader.spv
 uam -s frag -i spirv -o output.dksh shader.spv
+
+# Emit a reflection sidecar next to the .dksh (output.dksh.refl)
+uam -s vert -o output.dksh --reflect input.glsl
+# ...or to an explicit path
+uam -s frag -o output.dksh --reflect=output.refl input.glsl
 ```
 
 ### Both targets
@@ -133,6 +138,45 @@ if (uam_compile_spirv(compiler, spirv_data, spirv_size)) {
 | `uam_get_depth_range_offset(compiler)` | Byte offset of gl_DepthRange in constbuf (-1 if unused) |
 | `uam_get_num_inputs(compiler)` | Get number of vertex shader inputs |
 | `uam_get_input_info(compiler, index, info)` | Get input attribute metadata (name, location) |
+| `uam_write_reflection(compiler, path)` | Write the reflection sidecar (`.refl`) to a file |
+
+## Reflection sidecar (`.refl`)
+
+A compiled `.dksh` binary carries only **numeric** bindings — it loses the GL
+uniform/attribute *names*. That is fine for the runtime library path, where the
+host queries names live via `uam_get_*_info()` right after compiling. But a
+**precompiled** `.dksh` shipped on disk has no way to map a name like
+`u_mvp` back to its constbuf offset, so `glGetUniformLocation()` in a consumer
+(e.g. SwitchGLES) cannot resolve arbitrary names from the binary alone.
+
+To bridge that gap, uam can emit a **reflection sidecar** — a small binary file
+written next to the `.dksh` (`output.dksh` → `output.dksh.refl`). It serializes
+exactly the same tables exposed at runtime by `uam_get_*_info()`, so the
+precompiled and runtime paths converge on identical reflection data.
+
+Emit it from the CLI with `-R` / `--reflect`, or from the library with
+`uam_write_reflection(compiler, path)` after a successful compile.
+
+### Format
+
+All structs are POD with inline name arrays and explicit padding (fixed layout,
+`fread()`-able directly), defined in [`source/uam.h`](source/uam.h). Multi-byte
+fields are little-endian (native on both the x86 writer and the aarch64 reader).
+
+```
+[uam_refl_header_t]                         magic "SGLR", version, stage, counts…
+[uam_refl_uniform_t  × header.num_uniforms] name, offset, size, type, array
+[uam_refl_sampler_t  × header.num_samplers] name, binding, sampler type
+[uam_refl_input_t    × header.num_inputs]   name, location, type
+[header.constbuf_data_size bytes]           initial driver-constbuf data
+```
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `UAM_REFL_MAGIC` | `"SGLR"` | 4-byte magic (not NUL-terminated in the file) |
+| `UAM_REFL_VERSION` | `1` | format version |
+| `UAM_REFL_MAX_NAME` | `128` | inline name buffer length |
+| `UAM_REFL_FLAG_CONSTBUF_REMAPPED` | `1<<0` | driver constbuf remapped `c[0]`→`c[1]` (UBO 0) |
 
 ## GLSL requirements
 

@@ -132,6 +132,78 @@ const void *uam_get_constbuf_initial_data(const uam_compiler *compiler, uint32_t
 // The depth range occupies a vec4 at this offset: [near, far, diff, unused].
 int uam_get_depth_range_offset(const uam_compiler *compiler);
 
+// ===========================================================================
+// Reflection sidecar (.refl)
+// ===========================================================================
+// A precompiled .dksh binary carries only numeric bindings; it loses the GL
+// uniform/attribute names. To let SwitchGLES resolve glGetUniformLocation()
+// for precompiled shaders WITHOUT sglRegisterUniform(), uam can emit a sidecar
+// `.refl` file next to the `.dksh`. It serializes exactly the same reflection
+// tables that uam_get_*_info() expose at runtime, so both code paths converge.
+//
+// File layout (all multi-byte fields little-endian, i.e. native on Switch/PC):
+//   [uam_refl_header_t]
+//   [uam_refl_uniform_t  x header.num_uniforms]
+//   [uam_refl_sampler_t  x header.num_samplers]
+//   [uam_refl_input_t    x header.num_inputs]
+//   [header.constbuf_data_size bytes of initial driver-constbuf data]
+//
+// These are fixed-layout POD records (inline name arrays, explicit padding) so
+// a consumer can fread() them directly. Distinct from uam_*_info_t above, which
+// use `const char*` pointers and are runtime-only.
+
+#define UAM_REFL_MAGIC    "SGLR" // 4 bytes, NOT NUL-terminated in the file
+#define UAM_REFL_VERSION  1u
+#define UAM_REFL_MAX_NAME 128    // matches uam's internal GLSL_UNIFORM_MAX_NAME
+
+// uam_refl_header_t.flags bits
+#define UAM_REFL_FLAG_CONSTBUF_REMAPPED (1u << 0) // driver constbuf c[0]->c[1] (UBO 0)
+
+typedef struct {
+    char     magic[4];           // 'S','G','L','R'
+    uint32_t version;            // UAM_REFL_VERSION
+    uint32_t stage;              // DkStage of the shader
+    uint32_t num_uniforms;
+    uint32_t num_samplers;
+    uint32_t num_inputs;
+    uint32_t constbuf_size;      // total driver constbuf size in bytes
+    int32_t  depth_range_offset; // gl_DepthRange offset, -1 if unused
+    uint32_t constbuf_data_size; // bytes of initial constbuf data that follow
+    uint32_t flags;              // UAM_REFL_FLAG_*
+} uam_refl_header_t;
+
+typedef struct {
+    char     name[UAM_REFL_MAX_NAME];
+    uint32_t offset;             // byte offset in driver constbuf
+    uint32_t size_bytes;         // total size in bytes
+    uint32_t array_elements;     // 0 for non-array, N for array[N]
+    uint8_t  base_type;          // Mesa glsl_base_type (0=uint,1=int,2=float,11=bool,12=sampler)
+    uint8_t  vector_elements;    // 1-4
+    uint8_t  matrix_columns;     // 1 for scalars/vectors, 2-4 for matrices
+    uint8_t  is_sampler;         // 1 if sampler type
+} uam_refl_uniform_t;
+
+typedef struct {
+    char     name[UAM_REFL_MAX_NAME];
+    int32_t  binding;            // texture descriptor binding (0, 1, 2...)
+    uint8_t  type;               // 0=sampler2D, 1=samplerCube
+    uint8_t  pad[3];
+} uam_refl_sampler_t;
+
+typedef struct {
+    char     name[UAM_REFL_MAX_NAME];
+    int32_t  location;           // generic attribute location (0-based)
+    uint8_t  base_type;          // Mesa glsl_base_type
+    uint8_t  vector_elements;    // 1-4
+    uint8_t  matrix_columns;     // 1 for scalars/vectors, 2-4 for matrices
+    uint8_t  pad;
+} uam_refl_input_t;
+
+// Writes the reflection sidecar for the last compiled shader to `path`.
+// Call after uam_compile_dksh()/uam_compile_spirv() succeeds.
+// Returns true on success, false on bad args or file I/O error.
+bool uam_write_reflection(const uam_compiler *compiler, const char *path);
+
 #ifdef __cplusplus
 }
 #endif // __cplusplus

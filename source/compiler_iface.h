@@ -67,6 +67,10 @@ public:
 	void OutputRawCode(const char* rawFile);
 	void OutputTgsi(const char* tgsiFile);
 
+	/* Serialize the reflection tables (uniforms/samplers/inputs + constbuf)
+	 * to a sidecar `.refl` file. Returns true on success. */
+	bool OutputReflection(const char* reflFile) const;
+
 	void OutputDkshToMemory(void *mem) const;
 	size_t CalculateDkshSize() const;
 

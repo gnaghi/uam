@@ -162,3 +162,9 @@ const void *uam_get_constbuf_initial_data(const uam_compiler *compiler, uint32_t
 int uam_get_depth_range_offset(const uam_compiler *compiler) {
     return reinterpret_cast<const DekoCompiler *>(compiler)->GetDepthRangeOffset();
 }
+
+bool uam_write_reflection(const uam_compiler *compiler, const char *path) {
+    if (!compiler || !path)
+        return false;
+    return reinterpret_cast<const DekoCompiler *>(compiler)->OutputReflection(path);
+}

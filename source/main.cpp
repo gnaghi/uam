@@ -17,6 +17,8 @@ static int usage(const char* prog)
 		"                     glsl: Mesa frontend (default)\n"
 		"                     spirv: direct SPIR-V input\n"
 		"                     Auto-detected from file content if not specified\n"
+		"  -R, --reflect[=<file>]  Emit a reflection sidecar (name->binding/offset).\n"
+		"                     Defaults to <out>.refl next to the -o output\n"
 		"  -v, --version      Displays version information\n"
 		, prog);
 	return EXIT_FAILURE;
@@ -25,7 +27,9 @@ static int usage(const char* prog)
 int main(int argc, char* argv[])
 {
 	const char *inFile = nullptr, *outFile = nullptr, *rawFile = nullptr,
-	           *tgsiFile = nullptr, *stageName = nullptr, *inputFormat = nullptr;
+	           *tgsiFile = nullptr, *stageName = nullptr, *inputFormat = nullptr,
+	           *reflFile = nullptr;
+	bool emitReflection = false;
 
 	static struct option long_options[] =
 	{
@@ -34,13 +38,14 @@ int main(int argc, char* argv[])
 		{ "tgsi",         required_argument, NULL, 't' },
 		{ "stage",        required_argument, NULL, 's' },
 		{ "input-format", required_argument, NULL, 'i' },
+		{ "reflect",      optional_argument, NULL, 'R' },
 		{ "help",         no_argument,       NULL, '?' },
 		{ "version",      no_argument,       NULL, 'v' },
 		{ NULL, 0, NULL, 0 }
 	};
 
 	int opt, optidx = 0;
-	while ((opt = getopt_long(argc, argv, "o:r:t:s:i:?v", long_options, &optidx)) != -1)
+	while ((opt = getopt_long(argc, argv, "o:r:t:s:i:R::?v", long_options, &optidx)) != -1)
 	{
 		switch (opt)
 		{
@@ -49,6 +54,7 @@ int main(int argc, char* argv[])
 			case 't': tgsiFile = optarg; break;
 			case 's': stageName = optarg; break;
 			case 'i': inputFormat = optarg; break;
+			case 'R': emitReflection = true; if (optarg) reflFile = optarg; break;
 			case '?': usage(argv[0]); return EXIT_SUCCESS;
 			case 'v': printf("%s - Built on %s %s\n", PACKAGE_STRING, __DATE__, __TIME__); return EXIT_SUCCESS;
 			default:  return usage(argv[0]);
@@ -194,6 +200,22 @@ int main(int argc, char* argv[])
 
 	if (outFile)
 		compiler.OutputDksh(outFile);
+
+	if (emitReflection)
+	{
+		std::string path;
+		if (reflFile)
+			path = reflFile;
+		else if (outFile)
+			path = std::string(outFile) + ".refl";
+
+		if (path.empty())
+			fprintf(stderr, "--reflect needs -o <out> or an explicit filename\n");
+		else if (compiler.OutputReflection(path.c_str()))
+			printf("Reflection written: %s\n", path.c_str());
+		else
+			fprintf(stderr, "Failed to write reflection file: %s\n", path.c_str());
+	}
 
 	if (rawFile)
 		compiler.OutputRawCode(rawFile);
