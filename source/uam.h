@@ -29,6 +29,16 @@ typedef void *uam_compiler;
 void uam_get_version(int *major, int *minor, int *micro);
 int uam_get_version_nb(void);
 
+// Keeps the Mesa GLSL frontend (context, types, builtin functions) alive
+// across compilers. Each compiler holds a reference; when the last one is
+// freed the frontend is torn down, so a host that creates one compiler per
+// shader rebuilds every builtin on each compile (~28 ms per shader on Switch,
+// about 3x the compile itself).
+// Hold a reference with uam_retain_frontend() for the lifetime of the host,
+// then balance it with uam_release_frontend().
+void uam_retain_frontend(void);
+void uam_release_frontend(void);
+
 // Creates/destroys compiler
 // Returns NULL on failure
 uam_compiler *uam_create_compiler(DkStage stage);

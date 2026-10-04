@@ -33,6 +33,14 @@ inline pipeline_stage map_pipeline_stage(DkStage stage) {
     }
 }
 
+void uam_retain_frontend(void) {
+    glsl_frontend_init();
+}
+
+void uam_release_frontend(void) {
+    glsl_frontend_exit();
+}
+
 uam_compiler *uam_create_compiler(DkStage stage) {
     auto pstage = map_pipeline_stage(stage);
     if (pstage == static_cast<pipeline_stage>(-1))
