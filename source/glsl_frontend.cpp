@@ -802,14 +802,28 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 			if (storage->builtin || storage->hidden) continue;
 			if (!storage->type->is_sampler()) continue;
 
-			/* Find the base binding from opaque index (check all stages) */
-			int base_binding = -1;
+			/* Report the slot the generated code samples from. The TGSI
+			 * translation declares sampler N on SamplerUnits[N] (the binding
+			 * auto-assigned above in declaration order), not on the opaque
+			 * index N itself. The two differ as soon as an unused sampler is
+			 * declared before a used one: the linker compacts the opaque
+			 * indices, but the unused sampler still consumed a binding. */
+			int opaque_index = -1;
 			for (int st = 0; st < MESA_SHADER_STAGES; st++) {
 				if (storage->opaque[st].active) {
-					base_binding = storage->opaque[st].index;
+					opaque_index = storage->opaque[st].index;
 					break;
 				}
 			}
+			const int num_units = (int)(sizeof(linked_shader->Program->SamplerUnits) /
+			                            sizeof(linked_shader->Program->SamplerUnits[0]));
+			auto sampler_slot = [&](int e) -> int {
+				int idx = opaque_index + e;
+				if (opaque_index < 0)
+					return -1;
+				return idx < num_units ? linked_shader->Program->SamplerUnits[idx] : idx;
+			};
+			int base_binding = sampler_slot(0);
 			/* Determine sampler type */
 			uint8_t stype = 0; /* default: sampler2D */
 			if (storage->type->sampler_dimensionality == GLSL_SAMPLER_DIM_CUBE)
@@ -829,7 +843,7 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 				for (unsigned e = 0; e < count && s_num_samplers < GLSL_SAMPLER_MAX; e++) {
 					glsl_sampler_info_t *s = &s_samplers[s_num_samplers];
 					snprintf(s->name, GLSL_UNIFORM_MAX_NAME, "%s[%u]", storage->name, e);
-					s->binding = (base_binding >= 0) ? base_binding + (int)e : -1;
+					s->binding = sampler_slot((int)e);
 					s->type = stype;
 					s_num_samplers++;
 				}
