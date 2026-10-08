@@ -256,7 +256,9 @@ DekoCompiler::DekoCompiler(pipeline_stage stage, int optLevel) :
 	m_samplers{}, m_numSamplers{0},
 	m_inputs{}, m_numInputs{0},
 	m_depthRangeOffset{-1},
-	m_attribBindings{}, m_numAttribBindings{0}
+	m_attribBindings{}, m_numAttribBindings{0},
+	m_varyingBindings{}, m_numVaryingBindings{0},
+	m_varyings{}, m_numVaryings{0}
 {
 	m_nvsh.version = 3;
 	m_nvsh.sass_version = 3;
@@ -356,6 +358,15 @@ void DekoCompiler::SetAttribBinding(const char *name, int location)
 	b.location = location;
 }
 
+void DekoCompiler::SetVaryingBinding(const char *name, int location)
+{
+	if (m_numVaryingBindings >= GLSL_VARYING_MAX) return;
+	glsl_attrib_binding_t &b = m_varyingBindings[m_numVaryingBindings++];
+	strncpy(b.name, name, GLSL_UNIFORM_MAX_NAME - 1);
+	b.name[GLSL_UNIFORM_MAX_NAME - 1] = '\0';
+	b.location = location;
+}
+
 bool DekoCompiler::CompileGlsl(const char* glsl)
 {
 	m_errorLog.clear();
@@ -365,6 +376,11 @@ bool DekoCompiler::CompileGlsl(const char* glsl)
 	glsl_frontend_set_attrib_bindings(
 		m_numAttribBindings > 0 ? m_attribBindings : nullptr,
 		m_numAttribBindings);
+
+	/* Pass varying bindings too (always, so a previous compiler's are cleared) */
+	glsl_frontend_set_varying_bindings(
+		m_numVaryingBindings > 0 ? m_varyingBindings : nullptr,
+		m_numVaryingBindings);
 
 	m_glsl = glsl_program_create(glsl, m_stage);
 	if (!m_glsl)
@@ -396,6 +412,14 @@ bool DekoCompiler::CompileGlsl(const char* glsl)
 		const glsl_input_info_t *src = glsl_program_get_input_info(m_glsl, i);
 		if (src)
 			m_inputs[i] = *src;
+	}
+
+	/* Capture user varying metadata */
+	m_numVaryings = glsl_program_get_num_varyings(m_glsl);
+	for (int i = 0; i < m_numVaryings && i < GLSL_VARYING_MAX; i++) {
+		const glsl_varying_info_t *src = glsl_program_get_varying_info(m_glsl, i);
+		if (src)
+			m_varyings[i] = *src;
 	}
 
 	/* Capture gl_DepthRange offset */

@@ -49,6 +49,15 @@ void uam_free_compiler(uam_compiler *compiler);
 // Must be called BEFORE uam_compile_dksh().
 void uam_set_attrib_binding(uam_compiler *compiler, const char *name, int location);
 
+// Pins a user varying (VS output or FS input) to a generic varying slot.
+// Each stage is compiled on its own, so Mesa lays out varyings from that
+// stage's declarations alone: if the FS declares a different set of varyings
+// than the VS, the same name can land in different slots. Bind the FS inputs
+// to the slots reported by uam_get_varying_info() for the VS (or the reverse)
+// so both stages agree. Names that don't exist in the shader are ignored.
+// Must be called BEFORE uam_compile_dksh().
+void uam_set_varying_location(uam_compiler *compiler, const char *name, int location);
+
 // Compiles GLSL using Mesa frontend
 // Returns true on success, false otherwise
 bool uam_compile_dksh(uam_compiler *compiler, const char *glsl);
@@ -127,6 +136,21 @@ int uam_get_num_inputs(const uam_compiler *compiler);
 // Gets vertex input info by index (0..num_inputs-1)
 // Returns false if index out of range
 bool uam_get_input_info(const uam_compiler *compiler, int index, uam_input_info_t *info);
+
+// User varying metadata: VS outputs for a vertex shader, FS inputs for a
+// fragment shader (built-ins such as gl_Position are not listed)
+typedef struct {
+    const char *name;         // Varying name (arrays: base name, no [])
+    int location;             // Generic varying slot (0-based)
+    int num_slots;            // Consecutive slots used (arrays/matrices > 1)
+} uam_varying_info_t;
+
+// Gets the number of user varyings in the compiled shader
+int uam_get_num_varyings(const uam_compiler *compiler);
+
+// Gets varying info by index (0..num_varyings-1)
+// Returns false if index out of range
+bool uam_get_varying_info(const uam_compiler *compiler, int index, uam_varying_info_t *info);
 
 // Returns true if driver constbuf was remapped from c[0] to UBO 0 (c[1]).
 // When true, SwitchGLES must bind a UBO at id=0 with uniform data.

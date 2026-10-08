@@ -59,6 +59,35 @@ void glsl_frontend_set_attrib_bindings(const glsl_attrib_binding_t *bindings, in
 	s_num_attrib_bindings = count;
 }
 
+/* Varying location bindings — set by caller before glsl_program_create() */
+static glsl_attrib_binding_t s_varying_bindings[GLSL_VARYING_MAX];
+static int s_num_varying_bindings = 0;
+
+/* User varying metadata — populated during glsl_program_create() */
+static glsl_varying_info_t s_varyings[GLSL_VARYING_MAX];
+static int s_num_varyings = 0;
+
+void glsl_frontend_set_varying_bindings(const glsl_attrib_binding_t *bindings, int count)
+{
+	s_num_varying_bindings = 0;
+	if (!bindings || count <= 0) return;
+	if (count > GLSL_VARYING_MAX) count = GLSL_VARYING_MAX;
+	for (int i = 0; i < count; i++)
+		s_varying_bindings[i] = bindings[i];
+	s_num_varying_bindings = count;
+}
+
+/* Mode of the user varyings a stage exchanges with the other stage of a
+ * VS+FS pipeline, or ir_var_auto for stages that have none. */
+static ir_variable_mode varying_mode(pipeline_stage stage)
+{
+	if (stage == pipeline_stage_vertex)
+		return ir_var_shader_out;
+	if (stage == pipeline_stage_fragment)
+		return ir_var_shader_in;
+	return ir_var_auto;
+}
+
 class dead_variable_visitor : public ir_hierarchical_visitor {
 public:
 	dead_variable_visitor()
@@ -566,6 +595,26 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 			s_attrib_bindings[i].name);
 	}
 
+	/* Apply varying bindings as explicit locations before linking. The
+	 * linker keeps explicit locations, reserves their slots, and lays out the
+	 * remaining varyings around them. */
+	if (s_num_varying_bindings > 0 && varying_mode(stage) != ir_var_auto) {
+		foreach_in_list(ir_instruction, node, shader->ir) {
+			ir_variable *var = node->as_variable();
+			if (!var || var->data.mode != varying_mode(stage) ||
+			    var->data.explicit_location)
+				continue;
+			for (int i = 0; i < s_num_varying_bindings; i++) {
+				if (strcmp(var->name, s_varying_bindings[i].name) == 0) {
+					var->data.explicit_location = true;
+					var->data.location = VARYING_SLOT_VAR0 + s_varying_bindings[i].location;
+					var->data.location_frac = 0;
+					break;
+				}
+			}
+		}
+	}
+
 	// Link the shader
 	link_shaders(&gl_ctx, prg);
 	if (prg->data->LinkStatus != LINKING_SUCCESS)
@@ -613,6 +662,29 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 				inp->matrix_columns = var->type->matrix_columns;
 				inp->pad = 0;
 				s_num_inputs++;
+			}
+		}
+
+		/* Collect the user varying slots, so the host can bind the other
+		 * stage's varyings of the same name to the same slots. */
+		s_num_varyings = 0;
+		if (varying_mode(stage) != ir_var_auto) {
+			foreach_in_list(ir_instruction, node, linked_shader->ir) {
+				ir_variable *var = node->as_variable();
+				if (!var || var->data.mode != varying_mode(stage))
+					continue;
+				/* Skip built-ins (gl_Position, gl_FragCoord, ...) */
+				if (var->data.location < (int)VARYING_SLOT_VAR0)
+					continue;
+				if (s_num_varyings >= GLSL_VARYING_MAX)
+					break;
+
+				glsl_varying_info_t *v = &s_varyings[s_num_varyings];
+				strncpy(v->name, var->name, GLSL_UNIFORM_MAX_NAME - 1);
+				v->name[GLSL_UNIFORM_MAX_NAME - 1] = '\0';
+				v->location = var->data.location - VARYING_SLOT_VAR0;
+				v->num_slots = var->type->count_attribute_slots(false);
+				s_num_varyings++;
 			}
 		}
 
@@ -979,4 +1051,18 @@ int glsl_program_get_depth_range_offset(glsl_program prg)
 {
 	(void)prg;
 	return s_depth_range_offset;
+}
+
+int glsl_program_get_num_varyings(glsl_program prg)
+{
+	(void)prg;
+	return s_num_varyings;
+}
+
+const glsl_varying_info_t* glsl_program_get_varying_info(glsl_program prg, int index)
+{
+	(void)prg;
+	if (index < 0 || index >= s_num_varyings)
+		return nullptr;
+	return &s_varyings[index];
 }

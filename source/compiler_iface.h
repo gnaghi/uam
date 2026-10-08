@@ -54,6 +54,14 @@ class DekoCompiler
 	glsl_attrib_binding_t m_attribBindings[GLSL_ATTRIB_BINDING_MAX];
 	int m_numAttribBindings;
 
+	/* Varying location bindings (to match the other stage's slots) */
+	glsl_attrib_binding_t m_varyingBindings[GLSL_VARYING_MAX];
+	int m_numVaryingBindings;
+
+	/* User varying metadata (VS outputs / FS inputs) */
+	glsl_varying_info_t m_varyings[GLSL_VARYING_MAX];
+	int m_numVaryings;
+
 	void RetrieveAndPadCode();
 	void GenerateHeaders();
 
@@ -105,4 +113,13 @@ public:
 
 	/* Attribute binding (call before CompileGlsl) */
 	void SetAttribBinding(const char *name, int location);
+
+	/* Varying location binding (call before CompileGlsl) */
+	void SetVaryingBinding(const char *name, int location);
+
+	/* User varying metadata accessors */
+	int GetNumVaryings() const { return m_numVaryings; }
+	const glsl_varying_info_t* GetVaryingInfo(int index) const {
+		return (index >= 0 && index < m_numVaryings) ? &m_varyings[index] : nullptr;
+	}
 };

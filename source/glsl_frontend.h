@@ -49,6 +49,17 @@ typedef struct {
 
 void glsl_frontend_set_attrib_bindings(const glsl_attrib_binding_t *bindings, int count);
 
+/* Varying location bindings (set before glsl_program_create).
+ * Each stage is linked as its own separable program, so Mesa lays out user
+ * varyings from that stage's declarations alone: a fragment shader that
+ * declares a different set of varyings than its vertex shader gets different
+ * slots for the same name. Binding a name pins it to a generic slot, which is
+ * applied as an explicit location to the VS outputs / FS inputs of that name.
+ * Reuses glsl_attrib_binding_t (name + location). */
+#define GLSL_VARYING_MAX 32
+
+void glsl_frontend_set_varying_bindings(const glsl_attrib_binding_t *bindings, int count);
+
 glsl_program glsl_program_create(const char* source, pipeline_stage stage);
 const tgsi_token* glsl_program_get_tokens(glsl_program prg, unsigned int& num_tokens);
 void* glsl_program_get_constant_buffer(glsl_program prg, unsigned int& out_size);
@@ -91,3 +102,13 @@ const glsl_input_info_t* glsl_program_get_input_info(glsl_program prg, int index
 /* Returns byte offset of gl_DepthRange in driver constbuf, or -1 if not used.
  * The depth range occupies a vec4: [near, far, diff, unused]. */
 int glsl_program_get_depth_range_offset(glsl_program prg);
+
+/* User varying metadata — VS outputs or FS inputs, populated for those stages */
+typedef struct {
+	char name[GLSL_UNIFORM_MAX_NAME];
+	int location;   /* Generic varying slot (0-based, VARYING_SLOT_VAR0 relative) */
+	int num_slots;  /* Consecutive slots used (arrays/matrices use more than 1) */
+} glsl_varying_info_t;
+
+int glsl_program_get_num_varyings(glsl_program prg);
+const glsl_varying_info_t* glsl_program_get_varying_info(glsl_program prg, int index);

@@ -65,6 +65,10 @@ void uam_set_attrib_binding(uam_compiler *compiler, const char *name, int locati
     reinterpret_cast<DekoCompiler *>(compiler)->SetAttribBinding(name, location);
 }
 
+void uam_set_varying_location(uam_compiler *compiler, const char *name, int location) {
+    reinterpret_cast<DekoCompiler *>(compiler)->SetVaryingBinding(name, location);
+}
+
 bool uam_compile_dksh(uam_compiler *compiler, const char *glsl) {
     return reinterpret_cast<DekoCompiler *>(compiler)->CompileGlsl(glsl);
 }
@@ -153,6 +157,22 @@ bool uam_get_input_info(const uam_compiler *compiler, int index, uam_input_info_
     info->vector_elements = src->vector_elements;
     info->matrix_columns = src->matrix_columns;
     info->pad = 0;
+    return true;
+}
+
+int uam_get_num_varyings(const uam_compiler *compiler) {
+    return reinterpret_cast<const DekoCompiler *>(compiler)->GetNumVaryings();
+}
+
+bool uam_get_varying_info(const uam_compiler *compiler, int index, uam_varying_info_t *info) {
+    const glsl_varying_info_t *src =
+        reinterpret_cast<const DekoCompiler *>(compiler)->GetVaryingInfo(index);
+    if (!src || !info)
+        return false;
+
+    info->name = src->name;
+    info->location = src->location;
+    info->num_slots = src->num_slots;
     return true;
 }
 
