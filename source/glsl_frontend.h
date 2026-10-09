@@ -60,6 +60,11 @@ void glsl_frontend_set_attrib_bindings(const glsl_attrib_binding_t *bindings, in
 
 void glsl_frontend_set_varying_bindings(const glsl_attrib_binding_t *bindings, int count);
 
+/* Runs only the Mesa preprocessor, with the same implicit #version and builtin
+ * macros as glsl_program_create. Returns a malloc'd copy of the output, or NULL
+ * on a preprocessor error. */
+char* glsl_frontend_preprocess(const char* source, pipeline_stage stage);
+
 glsl_program glsl_program_create(const char* source, pipeline_stage stage);
 const tgsi_token* glsl_program_get_tokens(glsl_program prg, unsigned int& num_tokens);
 void* glsl_program_get_constant_buffer(glsl_program prg, unsigned int& out_size);

@@ -73,6 +73,20 @@ bool uam_compile_dksh(uam_compiler *compiler, const char *glsl) {
     return reinterpret_cast<DekoCompiler *>(compiler)->CompileGlsl(glsl);
 }
 
+char *uam_preprocess(DkStage stage, const char *glsl) {
+    auto pstage = map_pipeline_stage(stage);
+    if (!glsl || pstage == static_cast<pipeline_stage>(-1))
+        return NULL;
+    glsl_frontend_init();
+    char *text = glsl_frontend_preprocess(glsl, pstage);
+    glsl_frontend_exit();
+    return text;
+}
+
+void uam_free_preprocessed(char *text) {
+    free(text);
+}
+
 bool uam_compile_spirv(uam_compiler *compiler, const void *spirv_data, size_t spirv_size) {
     if (!spirv_data || spirv_size < 20 || (spirv_size % 4) != 0)
         return false;

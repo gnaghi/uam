@@ -455,6 +455,83 @@ bool tgsi_translate_geometry(struct gl_context *ctx, struct gl_program *prog);
 bool tgsi_translate_fragment(struct gl_context *ctx, struct gl_program *prog);
 bool tgsi_translate_compute(struct gl_context *ctx, struct gl_program *prog);
 
+static bool shader_set_stage(struct gl_shader *shader, pipeline_stage stage)
+{
+	switch (stage)
+	{
+		case pipeline_stage_vertex:
+			shader->Type = GL_VERTEX_SHADER;
+			break;
+		case pipeline_stage_tess_ctrl:
+			shader->Type = GL_TESS_CONTROL_SHADER;
+			break;
+		case pipeline_stage_tess_eval:
+			shader->Type = GL_TESS_EVALUATION_SHADER;
+			break;
+		case pipeline_stage_geometry:
+			shader->Type = GL_GEOMETRY_SHADER;
+			break;
+		case pipeline_stage_fragment:
+			shader->Type = GL_FRAGMENT_SHADER;
+			break;
+		case pipeline_stage_compute:
+			shader->Type = GL_COMPUTE_SHADER;
+			break;
+		default:
+			return false;
+	}
+	shader->Stage = _mesa_shader_enum_to_shader_stage(shader->Type);
+	return true;
+}
+
+/* GLES2 spec: shaders without #version are implicitly ES 1.00.
+ * Mesa with API_OPENGL_CORE requires an explicit #version directive
+ * to recognize ES keywords (attribute, varying, etc.), so prepend
+ * "#version 100\n" when the source lacks a #version directive.
+ * "#line 1" resets line numbering so __LINE__ matches the original source.
+ * The patched copy is allocated on mem_ctx. */
+static const char *source_with_version(void *mem_ctx, const char *source)
+{
+	const char *p = source;
+	/* Skip whitespace AND comments before #version (GLSL spec allows them) */
+	for (;;) {
+		while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+		if (p[0] == '/' && p[1] == '/') { /* line comment */
+			while (*p && *p != '\n') p++;
+			continue;
+		}
+		if (p[0] == '/' && p[1] == '*') { /* block comment */
+			p += 2;
+			while (*p && !(p[0] == '*' && p[1] == '/')) p++;
+			if (*p) p += 2;
+			continue;
+		}
+		break;
+	}
+	if (strncmp(p, "#version", 8) == 0)
+		return source;
+	size_t len = strlen(source);
+	char *patched = ralloc_array(mem_ctx, char, len + 22);
+	memcpy(patched, "#version 100\n#line 1\n", 21);
+	memcpy(patched + 21, source, len + 1);
+	return patched;
+}
+
+char* glsl_frontend_preprocess(const char* source, pipeline_stage stage)
+{
+	struct gl_shader *shader = rzalloc(NULL, gl_shader);
+	char *out = NULL;
+	if (shader && shader_set_stage(shader, stage))
+	{
+		const char *text = source_with_version(shader, source);
+		char *log = NULL;
+		if (_mesa_glsl_preprocess_shader(&gl_ctx, shader, &text, &log) == 0)
+			out = strdup(text);
+	}
+	ralloc_free(shader);
+	return out;
+}
+
 glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 {
 	struct gl_shader_program *prg;
@@ -480,63 +557,9 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 	prg->Shaders[prg->NumShaders] = shader;
 	prg->NumShaders++;
 
-	switch (stage)
-	{
-		case pipeline_stage_vertex:
-			shader->Type = GL_VERTEX_SHADER;
-			break;
-		case pipeline_stage_tess_ctrl:
-			shader->Type = GL_TESS_CONTROL_SHADER;
-			break;
-		case pipeline_stage_tess_eval:
-			shader->Type = GL_TESS_EVALUATION_SHADER;
-			break;
-		case pipeline_stage_geometry:
-			shader->Type = GL_GEOMETRY_SHADER;
-			break;
-		case pipeline_stage_fragment:
-			shader->Type = GL_FRAGMENT_SHADER;
-			break;
-		case pipeline_stage_compute:
-			shader->Type = GL_COMPUTE_SHADER;
-			break;
-		default:
-			goto _fail;
-	}
-	shader->Stage = _mesa_shader_enum_to_shader_stage(shader->Type);
-
-	/* GLES2 spec: shaders without #version are implicitly ES 1.00.
-	 * Mesa with API_OPENGL_CORE requires an explicit #version directive
-	 * to recognize ES keywords (attribute, varying, etc.), so prepend
-	 * "#version 100\n" when the source lacks a #version directive.
-	 * "#line 1" resets line numbering so __LINE__ matches the original source. */
-	{
-		const char *p = source;
-		/* Skip whitespace AND comments before #version (GLSL spec allows them) */
-		for (;;) {
-			while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-			if (p[0] == '/' && p[1] == '/') { /* line comment */
-				while (*p && *p != '\n') p++;
-				continue;
-			}
-			if (p[0] == '/' && p[1] == '*') { /* block comment */
-				p += 2;
-				while (*p && !(p[0] == '*' && p[1] == '/')) p++;
-				if (*p) p += 2;
-				continue;
-			}
-			break;
-		}
-		if (strncmp(p, "#version", 8) != 0) {
-			size_t len = strlen(source);
-			char *patched = ralloc_array(prg, char, len + 22);
-			memcpy(patched, "#version 100\n#line 1\n", 21);
-			memcpy(patched + 21, source, len + 1);
-			shader->Source = patched;
-		} else {
-			shader->Source = source;
-		}
-	}
+	if (!shader_set_stage(shader, stage))
+		goto _fail;
+	shader->Source = source_with_version(shader, source);
 
 	// "Compile" the shader
 	_mesa_glsl_compile_shader(&gl_ctx, shader, false, false, true);

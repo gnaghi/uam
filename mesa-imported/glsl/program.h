@@ -37,6 +37,14 @@ extern void
 _mesa_glsl_compile_shader(struct gl_context *ctx, struct gl_shader *shader,
 			  bool dump_ast, bool dump_hir, bool force_recompile);
 
+/* uam: runs only the preprocessor on *source, with the builtin macros of a
+ * real compile of `shader` (GL_ES, extension macros...). *source receives the
+ * output, allocated on `shader`; *info_log the messages. Returns the number
+ * of preprocessor errors. */
+extern int
+_mesa_glsl_preprocess_shader(struct gl_context *ctx, struct gl_shader *shader,
+			     const char **source, char **info_log);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

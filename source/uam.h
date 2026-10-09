@@ -62,6 +62,15 @@ void uam_set_varying_location(uam_compiler *compiler, const char *name, int loca
 // Returns true on success, false otherwise
 bool uam_compile_dksh(uam_compiler *compiler, const char *glsl);
 
+// Runs only the Mesa preprocessor on a GLSL source, with the same implicit
+// #version and builtin macros (GL_ES, extension macros...) as
+// uam_compile_dksh() for that stage: inactive #if blocks are removed and
+// macros expanded. Lets a host check language rules on the text the compiler
+// actually sees. Returns a string to release with uam_free_preprocessed(), or
+// NULL on a preprocessor error (uam_compile_dksh() reports it).
+char *uam_preprocess(DkStage stage, const char *glsl);
+void uam_free_preprocessed(char *text);
+
 // Compiles a SPIR-V binary to DKSH
 // spirv_data: pointer to SPIR-V binary (must start with SPIR-V magic)
 // spirv_size: size in bytes (must be a multiple of 4)
