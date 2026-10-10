@@ -575,15 +575,48 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 	/* Auto-assign bindings to unbound sampler/image uniforms (ES 1.00
 	 * doesn't have explicit binding layout qualifiers). Assign sequential
 	 * binding numbers starting from 0, matching GLES2 default behavior
-	 * where sampler N reads from texture unit N. */
+	 * where sampler N reads from texture unit N.
+	 *
+	 * Uniform blocks without a binding (GLSL ES 3.00 cannot declare one)
+	 * get sequential bindings too, starting from FIRST_AUTO_BLOCK_BINDING:
+	 * binding 0 would alias the driver constbuf once it is remapped to
+	 * CONST[1] (a block at binding b reads CONST[b+1]), and SwitchGLES keeps
+	 * UBO bindings 0-1 for its packed uniform buffers. The members of an
+	 * unnamed block are separate variables sharing one interface type: they
+	 * all get the binding of that type. */
 	{
 		int next_sampler_binding = 0;
+		const int FIRST_AUTO_BLOCK_BINDING = 2;
+		const int MAX_AUTO_BLOCKS = 32;
+		const glsl_type *block_types[MAX_AUTO_BLOCKS];
+		int block_bindings[MAX_AUTO_BLOCKS];
+		int num_blocks = 0;
+		int next_block_binding = FIRST_AUTO_BLOCK_BINDING;
 		foreach_in_list(ir_instruction, node, shader->ir) {
 			ir_variable *var = node->as_variable();
 			if (!var || var->data.mode != ir_var_uniform)
 				continue;
 			const glsl_type *type = var->type->without_array();
-			if ((type->is_sampler() || type->is_image()) &&
+			if (var->is_in_buffer_block()) {
+				if (var->data.explicit_binding)
+					continue;
+				const glsl_type *iface = var->get_interface_type();
+				int b = 0;
+				while (b < num_blocks && block_types[b] != iface)
+					b++;
+				if (b == num_blocks) {
+					if (num_blocks == MAX_AUTO_BLOCKS)
+						continue; /* reported by the linker: no binding */
+					block_types[b] = iface;
+					block_bindings[b] = next_block_binding;
+					num_blocks++;
+					/* An instance array takes one binding per element */
+					next_block_binding += var->is_interface_instance() && var->type->is_array()
+						? var->type->arrays_of_arrays_size() : 1;
+				}
+				var->data.explicit_binding = true;
+				var->data.binding = block_bindings[b];
+			} else if ((type->is_sampler() || type->is_image()) &&
 			    !var->data.explicit_binding) {
 				var->data.explicit_binding = true;
 				var->data.binding = next_sampler_binding;
