@@ -283,6 +283,7 @@ initialize_context(struct gl_context *ctx, gl_api api)
 	ctx->Const.MaxRenderbufferSize = ctx->Const.MaxTextureRectSize;
 	ctx->Const.SubPixelBits = 8;
 	ctx->Const.ViewportSubpixelBits = 8;
+	/* Per shader, see apply_version_limits */
 	ctx->Const.MaxDrawBuffers = ctx->Const.MaxColorAttachments = 1;
 	ctx->Const.MaxDualSourceDrawBuffers = 1;
 	ctx->Const.MaxLineWidth = 10.0f;
@@ -484,15 +485,8 @@ static bool shader_set_stage(struct gl_shader *shader, pipeline_stage stage)
 	return true;
 }
 
-/* GLES2 spec: shaders without #version are implicitly ES 1.00.
- * Mesa with API_OPENGL_CORE requires an explicit #version directive
- * to recognize ES keywords (attribute, varying, etc.), so prepend
- * "#version 100\n" when the source lacks a #version directive.
- * "#line 1" resets line numbering so __LINE__ matches the original source.
- * The patched copy is allocated on mem_ctx. */
-static const char *source_with_version(void *mem_ctx, const char *source)
+static const char *skip_blanks_and_comments(const char *p)
 {
-	const char *p = source;
 	/* Skip whitespace AND comments before #version (GLSL spec allows them) */
 	for (;;) {
 		while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
@@ -508,6 +502,18 @@ static const char *source_with_version(void *mem_ctx, const char *source)
 		}
 		break;
 	}
+	return p;
+}
+
+/* GLES2 spec: shaders without #version are implicitly ES 1.00.
+ * Mesa with API_OPENGL_CORE requires an explicit #version directive
+ * to recognize ES keywords (attribute, varying, etc.), so prepend
+ * "#version 100\n" when the source lacks a #version directive.
+ * "#line 1" resets line numbering so __LINE__ matches the original source.
+ * The patched copy is allocated on mem_ctx. */
+static const char *source_with_version(void *mem_ctx, const char *source)
+{
+	const char *p = skip_blanks_and_comments(source);
 	if (strncmp(p, "#version", 8) == 0)
 		return source;
 	size_t len = strlen(source);
@@ -515,6 +521,18 @@ static const char *source_with_version(void *mem_ctx, const char *source)
 	memcpy(patched, "#version 100\n#line 1\n", 21);
 	memcpy(patched + 21, source, len + 1);
 	return patched;
+}
+
+/* Limits that depend on the shading language version of `source` (already
+ * passed through source_with_version). GLSL ES 1.00 has one fragment output:
+ * gl_MaxDrawBuffers is 1 without EXT_draw_buffers, and SwitchGLES reports
+ * GL_MAX_DRAW_BUFFERS = 1 in GLES 2.0 contexts. Every later version gets the
+ * 4 draw buffers GLES 3.0 requires (deko3d binds up to 8 render targets). */
+static void apply_version_limits(struct gl_context *ctx, const char *source)
+{
+	const char *p = skip_blanks_and_comments(source);
+	bool es100 = strncmp(p, "#version", 8) == 0 && atoi(p + 8) == 100;
+	ctx->Const.MaxDrawBuffers = ctx->Const.MaxColorAttachments = es100 ? 1 : 4;
 }
 
 char* glsl_frontend_preprocess(const char* source, pipeline_stage stage)
@@ -560,6 +578,7 @@ glsl_program glsl_program_create(const char* source, pipeline_stage stage)
 	if (!shader_set_stage(shader, stage))
 		goto _fail;
 	shader->Source = source_with_version(shader, source);
+	apply_version_limits(&gl_ctx, shader->Source);
 
 	// "Compile" the shader
 	_mesa_glsl_compile_shader(&gl_ctx, shader, false, false, true);
