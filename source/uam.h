@@ -71,6 +71,14 @@ bool uam_compile_dksh(uam_compiler *compiler, const char *glsl);
 char *uam_preprocess(DkStage stage, const char *glsl);
 void uam_free_preprocessed(char *text);
 
+// Each uam compiler links its stage on its own, so the cross-stage rules of
+// the GLSL linker never run: varyings whose type or qualifiers differ between
+// the vertex and fragment shader, uniforms or uniform blocks declared
+// differently in the two stages. This links both sources together only to run
+// those checks (no code is generated). Returns NULL if they link, else the
+// link log, to release with uam_free_preprocessed().
+char *uam_check_program_link(const char *vertex_glsl, const char *fragment_glsl);
+
 // Compiles a SPIR-V binary to DKSH
 // spirv_data: pointer to SPIR-V binary (must start with SPIR-V magic)
 // spirv_size: size in bytes (must be a multiple of 4)

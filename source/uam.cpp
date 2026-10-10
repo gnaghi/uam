@@ -87,6 +87,15 @@ void uam_free_preprocessed(char *text) {
     free(text);
 }
 
+char *uam_check_program_link(const char *vertex_glsl, const char *fragment_glsl) {
+    if (!vertex_glsl || !fragment_glsl)
+        return NULL;
+    glsl_frontend_init();
+    char *log = glsl_frontend_check_link(vertex_glsl, fragment_glsl);
+    glsl_frontend_exit();
+    return log;
+}
+
 bool uam_compile_spirv(uam_compiler *compiler, const void *spirv_data, size_t spirv_size) {
     if (!spirv_data || spirv_size < 20 || (spirv_size % 4) != 0)
         return false;

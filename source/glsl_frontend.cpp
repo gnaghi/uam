@@ -1006,6 +1006,80 @@ _fail:
 	return NULL;
 }
 
+char* glsl_frontend_check_link(const char* vertex_source, const char* fragment_source)
+{
+	struct gl_shader_program *prg = rzalloc(NULL, struct gl_shader_program);
+	prg->data = rzalloc(prg, struct gl_shader_program_data);
+	prg->data->InfoLog = ralloc_strdup(prg->data, "");
+	prg->SeparateShader = false;
+	exec_list_make_empty(&prg->EmptyUniformLocations);
+	prg->AttributeBindings = new string_to_uint_map;
+	prg->FragDataBindings = new string_to_uint_map;
+	prg->FragDataIndexBindings = new string_to_uint_map;
+	prg->Shaders = reralloc(prg, prg->Shaders, struct gl_shader *, 2);
+
+	const char *sources[2] = { vertex_source, fragment_source };
+	const pipeline_stage stages[2] = { pipeline_stage_vertex, pipeline_stage_fragment };
+	char *result = NULL;
+
+	/* Uniform blocks need a binding to link (link_uniform_blocks.cpp): give
+	 * every unbound block one, the same in both stages for the same block
+	 * name, so that the check never fails on bindings the host assigns
+	 * itself. Samplers keep no binding here: they link without one, and a
+	 * per-stage numbering could differ between the stages. */
+	const int FIRST_AUTO_BLOCK_BINDING = 2;
+	const int MAX_AUTO_BLOCKS = 32;
+	const char *block_names[MAX_AUTO_BLOCKS];
+	int block_bindings[MAX_AUTO_BLOCKS];
+	int num_blocks = 0;
+	int next_block_binding = FIRST_AUTO_BLOCK_BINDING;
+
+	for (int i = 0; i < 2; i ++)
+	{
+		struct gl_shader *shader = rzalloc(prg, gl_shader);
+		prg->Shaders[prg->NumShaders++] = shader;
+		if (!shader_set_stage(shader, stages[i]))
+			goto done;
+		shader->Source = source_with_version(shader, sources[i]);
+		apply_version_limits(&gl_ctx, shader->Source);
+		_mesa_glsl_compile_shader(&gl_ctx, shader, false, false, true);
+		if (shader->CompileStatus != COMPILE_SUCCESS)
+			goto done; /* compile errors are the per-stage compiler's business */
+
+		foreach_in_list(ir_instruction, node, shader->ir) {
+			ir_variable *var = node->as_variable();
+			if (!var || var->data.mode != ir_var_uniform || !var->is_in_buffer_block() ||
+			    var->data.explicit_binding)
+				continue;
+			const char *name = var->get_interface_type()->name;
+			int b = 0;
+			while (b < num_blocks && strcmp(block_names[b], name) != 0)
+				b++;
+			if (b == num_blocks) {
+				if (num_blocks == MAX_AUTO_BLOCKS)
+					continue;
+				block_names[b] = name;
+				block_bindings[b] = next_block_binding;
+				num_blocks++;
+				next_block_binding += var->is_interface_instance() && var->type->is_array()
+					? var->type->arrays_of_arrays_size() : 1;
+			}
+			var->data.explicit_binding = true;
+			var->data.binding = block_bindings[b];
+		}
+	}
+
+	_mesa_clear_shader_program_data(&gl_ctx, prg);
+	link_shaders(&gl_ctx, prg);
+	if (prg->data->LinkStatus != LINKING_SUCCESS)
+		result = strdup(prg->data->InfoLog && prg->data->InfoLog[0] ? prg->data->InfoLog
+		                                                            : "error: link failed\n");
+
+done:
+	glsl_program_free(prg);
+	return result;
+}
+
 static struct gl_linked_shader *_glsl_program_get_linked_shader(glsl_program prg)
 {
 	struct gl_linked_shader *linked_shader = NULL;

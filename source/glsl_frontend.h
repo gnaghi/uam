@@ -66,6 +66,13 @@ void glsl_frontend_set_varying_bindings(const glsl_attrib_binding_t *bindings, i
 char* glsl_frontend_preprocess(const char* source, pipeline_stage stage);
 
 glsl_program glsl_program_create(const char* source, pipeline_stage stage);
+
+/* Links a vertex and a fragment shader into one (non-separable) program only
+ * to run the cross-stage checks of the GLSL linker, which the per-stage
+ * glsl_program_create cannot: matching varyings, uniforms and uniform blocks
+ * declared in both stages. Generates no code. Returns NULL if the program
+ * links, else a malloc'd copy of the link log. */
+char* glsl_frontend_check_link(const char* vertex_source, const char* fragment_source);
 const tgsi_token* glsl_program_get_tokens(glsl_program prg, unsigned int& num_tokens);
 void* glsl_program_get_constant_buffer(glsl_program prg, unsigned int& out_size);
 int8_t const* glsl_program_vertex_get_in_locations(glsl_program prg);
