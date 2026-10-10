@@ -1022,17 +1022,24 @@ char* glsl_frontend_check_link(const char* vertex_source, const char* fragment_s
 	const pipeline_stage stages[2] = { pipeline_stage_vertex, pipeline_stage_fragment };
 	char *result = NULL;
 
-	/* Uniform blocks need a binding to link (link_uniform_blocks.cpp): give
-	 * every unbound block one, the same in both stages for the same block
-	 * name, so that the check never fails on bindings the host assigns
-	 * itself. Samplers keep no binding here: they link without one, and a
-	 * per-stage numbering could differ between the stages. */
+	/* Uniform blocks (link_uniform_blocks.cpp) and sampler / image uniforms
+	 * (link_uniform_initializers.cpp:283-290, fincs-edit) need an explicit
+	 * binding to link, which the per-stage compile assigns itself
+	 * (glsl_program_create). Give every unbound one a binding here, the same
+	 * in both stages for the same block or uniform name, so that the check
+	 * never fails on bindings the host assigns, nor on the cross-stage
+	 * comparison of explicit bindings. Blocks and opaque uniforms are numbered
+	 * separately, as in glsl_program_create. */
 	const int FIRST_AUTO_BLOCK_BINDING = 2;
-	const int MAX_AUTO_BLOCKS = 32;
-	const char *block_names[MAX_AUTO_BLOCKS];
-	int block_bindings[MAX_AUTO_BLOCKS];
+	const int MAX_AUTO_BINDINGS = 64;
+	const char *block_names[MAX_AUTO_BINDINGS];
+	int block_bindings[MAX_AUTO_BINDINGS];
 	int num_blocks = 0;
 	int next_block_binding = FIRST_AUTO_BLOCK_BINDING;
+	const char *opaque_names[MAX_AUTO_BINDINGS];
+	int opaque_bindings[MAX_AUTO_BINDINGS];
+	int num_opaques = 0;
+	int next_opaque_binding = 0;
 
 	for (int i = 0; i < 2; i ++)
 	{
@@ -1048,24 +1055,40 @@ char* glsl_frontend_check_link(const char* vertex_source, const char* fragment_s
 
 		foreach_in_list(ir_instruction, node, shader->ir) {
 			ir_variable *var = node->as_variable();
-			if (!var || var->data.mode != ir_var_uniform || !var->is_in_buffer_block() ||
-			    var->data.explicit_binding)
+			if (!var || var->data.mode != ir_var_uniform || var->data.explicit_binding)
 				continue;
-			const char *name = var->get_interface_type()->name;
-			int b = 0;
-			while (b < num_blocks && strcmp(block_names[b], name) != 0)
-				b++;
-			if (b == num_blocks) {
-				if (num_blocks == MAX_AUTO_BLOCKS)
-					continue;
-				block_names[b] = name;
-				block_bindings[b] = next_block_binding;
-				num_blocks++;
-				next_block_binding += var->is_interface_instance() && var->type->is_array()
+			const glsl_type *type = var->type->without_array();
+			const char **names;
+			int *bindings, *num, *next;
+			const char *name;
+			int count;
+			if (var->is_in_buffer_block()) {
+				names = block_names, bindings = block_bindings;
+				num = &num_blocks, next = &next_block_binding;
+				name = var->get_interface_type()->name;
+				count = var->is_interface_instance() && var->type->is_array()
 					? var->type->arrays_of_arrays_size() : 1;
+			} else if ((type->is_sampler() || type->is_image()) && !var->contains_bindless()) {
+				names = opaque_names, bindings = opaque_bindings;
+				num = &num_opaques, next = &next_opaque_binding;
+				name = var->name;
+				count = var->type->is_array() ? var->type->arrays_of_arrays_size() : 1;
+			} else {
+				continue;
+			}
+			int b = 0;
+			while (b < *num && strcmp(names[b], name) != 0)
+				b++;
+			if (b == *num) {
+				if (*num == MAX_AUTO_BINDINGS)
+					continue;
+				names[b] = name;
+				bindings[b] = *next;
+				(*num)++;
+				*next += count;
 			}
 			var->data.explicit_binding = true;
-			var->data.binding = block_bindings[b];
+			var->data.binding = bindings[b];
 		}
 	}
 
